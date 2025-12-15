@@ -1,0 +1,15 @@
+title: Your Name # EDIT THIS FIELD
+
+# Set baseurl to your repo name for project pages (e.g., "/ACD-Portfolio")
+baseurl: "/ACD-Portfolio" # EDIT THIS FIELD
+
+color_scheme: light #OPTIONAL: "light" or "dark"
+
+# Do not modify parameters below:
+description: ACD-E25 Portfolio
+remote_theme: just-the-docs/just-the-docs
+
+plugins:
+  - jekyll-remote-theme
+
+search_enabled: true
