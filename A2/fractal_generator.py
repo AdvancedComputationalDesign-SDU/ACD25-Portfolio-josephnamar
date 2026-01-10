@@ -1,87 +1,105 @@
-"""
-Assignment 2: Fractal Generator
-
-Author: Your Name
-
-Description:
-This script generates fractal patterns using recursive functions and geometric transformations.
-"""
-
-# Import necessary libraries
-import math
+import os
+import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import LineString
-from shapely.affinity import rotate, translate
-import random
+from matplotlib.collections import LineCollection
 
-# Global list to store all line segments
-line_list = []
+# =========================
+# CONFIG
+# =========================
+SEED = 0
+ITERATIONS = 3
+STEP = 1.0
 
-def generate_fractal(start_point, angle, length, depth, max_depth, angle_change, length_scaling_factor):
-    """
-    Recursive function to generate fractal patterns.
+OUT_DIR = os.path.join(os.path.dirname(__file__), "images")
+OUT_NAME = "a2_01_baseline_colored.png"
 
-    Parameters:
-    - start_point: Tuple (x, y), starting coordinate.
-    - angle: Float, current angle in degrees.
-    - length: Float, length of the current line segment.
-    - depth: Int, current recursion depth.
-    - max_depth: Int, maximum recursion depth.
-    - angle_change: Float, angle change at each recursion.
-    - length_scaling_factor: Float, scaling factor for the length.
-    """
-    if depth > max_depth:
-        return
+os.makedirs(OUT_DIR, exist_ok=True)
+np.random.seed(SEED)
 
-    # Calculate the end point of the line segment
-    end_x = start_point[0] + length * math.cos(math.radians(angle))
-    end_y = start_point[1] + length * math.sin(math.radians(angle))
-    end_point = (end_x, end_y)
 
-    # Create a line segment using Shapely
-    line = LineString([start_point, end_point])
-    line_list.append(line)
+# =========================
+# DRAGON TURN SEQUENCE
+# =========================
+def dragon_turns(n):
+    if n <= 0:
+        return []
+    prev = dragon_turns(n - 1)
+    inv_rev = [-t for t in reversed(prev)]
+    return prev + [1] + inv_rev
 
-    # Update the length for the next recursion
-    new_length = length * length_scaling_factor
 
-    # Increment depth
-    next_depth = depth + 1
+# =========================
+# BUILD POINTS
+# =========================
+def build_points(turns, step=1.0):
+    heading = 0  # 0:E, 1:N, 2:W, 3:S
+    x, y = 0.0, 0.0
+    pts = [(x, y)]
 
-    # Recursive calls for branches
-    generate_fractal(end_point, angle + angle_change, new_length, next_depth, max_depth, angle_change, length_scaling_factor)
-    generate_fractal(end_point, angle - angle_change, new_length, next_depth, max_depth, angle_change, length_scaling_factor)
+    def step_vec(h):
+        if h == 0:
+            return (step, 0.0)
+        if h == 1:
+            return (0.0, step)
+        if h == 2:
+            return (-step, 0.0)
+        return (0.0, -step)
 
-# Main execution
-if __name__ == "__main__":
-    # Parameters
-    start_point = (0, 0)
-    initial_angle = 90
-    initial_length = 100
-    recursion_depth = 0
-    max_recursion_depth = 5
-    angle_change = 30
-    length_scaling_factor = 0.7
+    dx, dy = step_vec(heading)
+    x += dx
+    y += dy
+    pts.append((x, y))
 
-    # Clear the line list
-    line_list.clear()
+    for t in turns:
+        heading = (heading + t) % 4
+        dx, dy = step_vec(heading)
+        x += dx
+        y += dy
+        pts.append((x, y))
 
-    # Generate the fractal
-    generate_fractal(start_point, initial_angle, initial_length, recursion_depth, max_recursion_depth, angle_change, length_scaling_factor)
+    return pts
 
-    # Visualization
+
+# =========================
+# COLORED PLOTTING
+# =========================
+def save_colored(points, out_path):
+    # Build line segments [(p0,p1), (p1,p2), ...]
+    segments = [
+        [points[i], points[i + 1]]
+        for i in range(len(points) - 1)
+    ]
+
+    # Color index per segment
+    values = np.arange(len(segments))
+
+    lc = LineCollection(
+        segments,
+        cmap="viridis",
+        linewidth=1.0
+    )
+    lc.set_array(values)
+
     fig, ax = plt.subplots()
-    for line in line_list:
-        x, y = line.xy
-        ax.plot(x, y, color='green', linewidth=1)
+    ax.add_collection(lc)
 
-    # Optional: Customize the plot
-    ax.set_aspect('equal')
-    plt.axis('off')
-    plt.show()
+    ax.set_aspect("equal", adjustable="box")
+    ax.autoscale()
+    ax.axis("off")
 
-    # Save the figure
-    fig.savefig('images/fractal_tree.png', dpi=300, bbox_inches='tight')
+    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
-    # Repeat the process with different parameters for additional fractals
-    # ...
+
+# =========================
+# MAIN
+# =========================
+if __name__ == "__main__":
+    turns = dragon_turns(ITERATIONS)
+    points = build_points(turns, step=STEP)
+
+    out_path = os.path.join(OUT_DIR, OUT_NAME)
+    save_colored(points, out_path)
+
+    print(f"Saved: {out_path}")
