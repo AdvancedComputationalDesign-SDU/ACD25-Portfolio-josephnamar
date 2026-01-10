@@ -1,57 +1,88 @@
-# Assignment 1: NumPy Array Manipulation for 2D Pattern Generation
-
-# Instructions:
-# - Write your code to generate patterns using NumPy.
-# - Use comments to explain your logic and the methods you're using.
-# - Feel free to be creative and explore different techniques.
-
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
+import matplotlib.animation as animation
+from perlin_numpy  import generate_perlin_noise_2d
 
-# Initialize your canvas (e.g., a 2D array filled with zeros)
-# You can adjust the size as needed
-canvas_height = 100  # Modify as desired
-canvas_width = 100   # Modify as desired
-canvas = np.zeros((canvas_height, canvas_width))
 
-# Apply array manipulations to create a pattern
-# Suggestions:
-# - Use slicing and indexing to create stripes or checkerboards
-# - Use mathematical functions to create gradients
-# - Combine multiple patterns
+#array size
+h = 1280
+w = 1280
 
-# Example (you can modify or remove this):
-# Create horizontal stripes
-# for i in range(0, canvas_height, 20):
-#     canvas[i:i+10, :] = 255  # Assign a value to create a stripe
+# function to find the center of the array
+def center(h, w):
+    if h % 2 == 0:
+        center_h = h // 2 - 1  
+    else:
+        center_h = h//2
 
-# Introduce randomness to add variability
-# Suggestions:
-# - Use np.random functions to add noise
-# - Randomly change pixel values within certain regions
+    if w % 2 == 0:
+        center_w = w // 2 - 1 
+    else:
+        center_w = w//2
 
-# Example:
-# noise = np.random.randint(0, 50, (canvas_height, canvas_width))
-# canvas = canvas + noise
+    return center_h, center_w
 
-# Work with RGB channels
-# Convert your 2D canvas to a 3D array for RGB representation
-# Assign different colors to different parts of your pattern
+center_h, center_w = center(h, w)
 
-# Example:
-# canvas_rgb = np.stack((canvas, canvas, canvas), axis=2)
+# function to visualize the pattern
+def visualize_pattern(pattern):
+    plt.imshow(pattern)
+    plt.axis('off')
+    plt.show() 
 
-# Assign colors
-# canvas_rgb[:, :, 0] = 255  # Modify the red channel
-# canvas_rgb[:, :, 1] = canvas_rgb[:, :, 1] * 0.5  # Modify the green channel
 
-# Ensure your array values are within the valid range (0-255)
-# canvas_rgb = np.clip(canvas_rgb, 0, 255)
+# Example_01 of pattern creation
+pattern = np.zeros((h, w, 3), dtype=np.uint8)
+pattern[:, ::2, 0] = 255  # Red channel
+pattern[::4, w//3:2*w//3, 1] = 255  # Green channel
+pattern[:, 2*w//3::5, 2] = 255  # Blue channel
 
-# Visualize and save your image
-# plt.imshow(canvas_rgb.astype(np.uint8))
-# plt.axis('off')  # Hide axis
-# plt.show()
 
-# Save the image to the images folder
-# plt.savefig('images/pattern_example.png', bbox_inches='tight', pad_inches=0)
+# Example_05 of pattern creation / central gradient
+pattern = np.zeros((h, w, 3), dtype=np.uint8)
+y, x = np.ogrid[:h, :w]
+dist = np.sqrt((x - center_w)**2 + (y - center_h)**2)
+gradient = dist / dist.max() * 255
+pattern[:, :, 0] = gradient*2
+pattern[:, :, 1] = gradient 
+pattern[:, :, 2] = gradient *4
+
+pattern[:, ::2, 0] = 255  # Red channel
+pattern[::4, w//3:2*w//3, 1] = 255  # Green channel
+pattern[w//3:2*w//3,:, 1] = 255  # Green channel
+pattern[:, 2*w//3::5, 2] = 255  # Blue channel
+
+# sliced_pattern = pattern[int(center_h-(h/20)):int(center_h+(h/20)), int(center_w-(w/20)):int(center_w+(w/20))]
+# sliced_pattern_recolor = 255 - sliced_pattern
+a, b = 45, 15
+pattern[int(center_h-(h/a)):int(center_h+(h/a)), int(center_w-(w/b)):int(center_w+(w/b))] = 255- pattern[int(center_h-(h/a)):int(center_h+(h/a)), int(center_w-(w/b)):int(center_w+(w/b))]
+pattern[int(center_h-(h/b)):int(center_h+(h/b)), int(center_w-(w/a)):int(center_w+(w/a))] = 255- pattern[int(center_h-(h/b)):int(center_h+(h/b)), int(center_w-(w/a)):int(center_w+(w/a))]
+
+visualize_pattern(pattern)
+
+#invert green channel
+pattern[:, :, 2] = 200 - pattern[:, :, 1]
+
+#invert sliced cross
+pattern[int(center_h-(h/a)):int(center_h+(h/a)), int(center_w-(w/b)):int(center_w+(w/b))] = 255
+pattern[int(center_h-(h/b)):int(center_h+(h/b)), int(center_w-(w/a)):int(center_w+(w/a))] = 255
+
+visualize_pattern(pattern)
+
+
+# Example_08 of perlin noise pattern creation
+pattern = np.zeros((h, w, 3), dtype=np.uint8)
+np.random.seed(0)  
+noise = generate_perlin_noise_2d((h, w), (8,8), tileable=(True, False))
+normalized_noise = (noise - noise.min()) / (noise.max() - noise.min()) * 255
+pattern[:, :, 0] = normalized_noise.astype(np.uint16) *200
+pattern[:, :, 1] = (normalized_noise).astype(np.uint16)
+pattern[:, :, 2] = (normalized_noise).astype(np.uint16)
+visualize_pattern(pattern)
+
+pattern[:, :, 2] =(normalized_noise).astype(np.uint16) *10
+visualize_pattern(pattern)
+
+pattern[:, :, 1] =(normalized_noise).astype(np.uint16) *70
+visualize_pattern(pattern)
