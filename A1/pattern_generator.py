@@ -20,6 +20,8 @@ np.random.seed(SEED)
 # =========================
 # HELPERS
 # =========================
+
+# Get center coordinates
 def center(h, w):
     if h % 2 == 0:
         center_h = h // 2 - 1
@@ -36,7 +38,7 @@ def center(h, w):
 
 center_h, center_w = center(h, w)
 
-
+# Output the generated pattern
 def output_pattern(pattern, name):
     """
     MODE = "vis"  -> visualize (matches saving scaling)
@@ -58,6 +60,8 @@ def output_pattern(pattern, name):
 # =========================
 # Example_01: central gradient + stripes + cross
 # =========================
+
+# Generate gradient
 pattern = np.zeros((h, w, 3), dtype=np.uint8)
 y, x = np.ogrid[:h, :w]
 dist = np.sqrt((x - center_w) ** 2 + (y - center_h) ** 2)
@@ -67,11 +71,17 @@ pattern[:, :, 0] = gradient * 2
 pattern[:, :, 1] = gradient
 pattern[:, :, 2] = gradient * 4
 
+output_pattern(pattern, "ex01_01_gradient")
+
+# Add stripes 
 pattern[:, ::2, 0] = 255  # Red channel
 pattern[::4, w // 3:2 * w // 3, 1] = 255  # Green channel
 pattern[w // 3:2 * w // 3, :, 1] = 255  # Green channel
 pattern[:, 2 * w // 3::5, 2] = 255  # Blue channel
 
+output_pattern(pattern, "ex01_02_gradient_stripes")
+
+# Cross inversion
 a, b = 45, 15
 pattern[int(center_h - (h / a)):int(center_h + (h / a)),
         int(center_w - (w / b)):int(center_w + (w / b))] = \
@@ -83,36 +93,41 @@ pattern[int(center_h - (h / b)):int(center_h + (h / b)),
     255 - pattern[int(center_h - (h / b)):int(center_h + (h / b)),
                   int(center_w - (w / a)):int(center_w + (w / a))]
 
-output_pattern(pattern, "ex01_cross_inversion")
+output_pattern(pattern, "ex01_03_cross_inversion")
 
-# invert based on green channel (as in your code)
+# Invert based on green channel
 pattern[:, :, 2] = 200 - pattern[:, :, 1]
 
-# white cross
+# White cross
 pattern[int(center_h - (h / a)):int(center_h + (h / a)),
         int(center_w - (w / b)):int(center_w + (w / b))] = 255
 pattern[int(center_h - (h / b)):int(center_h + (h / b)),
         int(center_w - (w / a)):int(center_w + (w / a))] = 255
 
-output_pattern(pattern, "ex01_white_cross")
+output_pattern(pattern, "ex01_04_white_cross")
 
 
 # =========================
 # Example_02: Perlin noise variations
 # =========================
+
+# Generate Perlin noise
 pattern = np.zeros((h, w, 3), dtype=np.uint8)
 
 np.random.seed(SEED)
 noise = generate_perlin_noise_2d((h, w), (8, 8), tileable=(True, False))
 normalized_noise = (noise - noise.min()) / (noise.max() - noise.min()) * 255
 
+# Set RGB channels
 pattern[:, :, 0] = (normalized_noise.astype(np.uint16) * 200).astype(np.uint8)
 pattern[:, :, 1] = normalized_noise.astype(np.uint8)
 pattern[:, :, 2] = normalized_noise.astype(np.uint8)
 output_pattern(pattern, "ex02_perlin_base")
 
+# Blue channel variation
 pattern[:, :, 2] = (normalized_noise.astype(np.uint16) * 10).astype(np.uint8)
 output_pattern(pattern, "ex02_perlin_blue10")
 
+# Green channel variation
 pattern[:, :, 1] = (normalized_noise.astype(np.uint16) * 70).astype(np.uint8)
 output_pattern(pattern, "ex02_perlin_green70")
