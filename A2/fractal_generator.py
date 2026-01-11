@@ -8,7 +8,7 @@ from matplotlib.collections import LineCollection
 # =========================
 MODE = "vis"   # "vis" or "save"
 SEED = 42
-ITERATIONS = 4
+ITERATIONS = [3, 7, 14]  
 STEP = 1.0
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "images")
@@ -16,6 +16,7 @@ BASE_TITLE = "Dragon curve"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 np.random.seed(SEED)
+
 
 # =========================
 # OUTPUT TITLE
@@ -73,13 +74,14 @@ def build_points(turns, step=1.0):
 # OUTPUT (vis or save)
 # =========================
 def output_colored(points, out_path=None, title=None):
-    # Build line segments [(p0,p1), (p1,p2), ...]
+    # Build line segments 
     segments = [[points[i], points[i + 1]] for i in range(len(points) - 1)]
     values = np.arange(len(segments))
 
     lc = LineCollection(segments, cmap="viridis", linewidth=1.0)
     lc.set_array(values)
 
+    # Create figure and axis
     fig, ax = plt.subplots()
     ax.add_collection(lc)
     ax.set_aspect("equal", adjustable="box")
@@ -88,7 +90,7 @@ def output_colored(points, out_path=None, title=None):
 
     full_title = make_title(BASE_TITLE)
 
-    # --- annotation below the figure ---
+    # Annotation below the figure
     fig.text(
         0.5,
         0.02,
@@ -97,7 +99,7 @@ def output_colored(points, out_path=None, title=None):
         va="center",
         fontsize=9
     )
-
+    # Visualise or save the figure
     if MODE == "vis":
         plt.show()
         plt.close(fig)
@@ -116,12 +118,13 @@ def output_colored(points, out_path=None, title=None):
 # MAIN
 # =========================
 if __name__ == "__main__":
-    turns = dragon_turns(ITERATIONS)
-    points = build_points(turns, step=STEP)
 
-    output_colored(points, BASE_TITLE)
+    for i in ITERATIONS:
+        ITERATIONS = i 
 
-    # if MODE == "save":
-    #     output_colored(points, BASE_TITLE)
-    # else:
-    #     output_colored(points, title=f"Dragon curve (iterations={ITERATIONS})")
+        turns = dragon_turns(ITERATIONS)
+        points = build_points(turns, step=STEP)
+
+        output_colored(points, BASE_TITLE)
+
+
