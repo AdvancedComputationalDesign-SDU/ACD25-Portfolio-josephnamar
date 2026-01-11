@@ -2,144 +2,154 @@
 
 This assignment explores a **recursive fractal system** based on the *Heighway dragon curve* and investigates how introducing **geometric constraints and spatial bias** alters recursive growth.
 
-The work intentionally compares **deterministic recursion** with **rule-modified recursion**, showing how small local decisions propagate into large-scale geometric differences.
+The script generates and saves four variants (**baseline**, **self_avoid**, **attractor**, **attractor_self_avoid**) for multiple recursion depths (**iterations = 3, 7, 10, 15**).
 
 ---
 
-## 1. Baseline: Pure recursive dragon curve
+## Core logic (shared by all variants)
 
-### Logic
-The baseline implementation follows the classic recursive definition of the dragon curve:
+### 1) Recursive turn sequence (the “DNA”)
+The dragon curve is defined by a turn sequence of **left/right 90° turns**.  
+`dragon_turns(n)` builds this sequence recursively:
 
-S(n) = S(n−1) + [L] + invert(reverse(S(n−1)))
+- Base: `S(0) = []`
+- Recurrence:
+  - `S(n) = S(n-1) + [L] + invert(reverse(S(n-1)))`
 
-- Each iteration doubles the previous sequence and inserts a single left turn.
-- The number of turns at iteration n is 2^n − 1.
-- Every turn produces exactly one segment.
-- No turns are skipped, modified, or rejected.
+In the code:
+- `+1` encodes a **left** turn
+- `-1` encodes a **right** turn
+- `invert` is implemented by multiplying turns by `-1`
 
-### Consequences
-- The geometry is fully deterministic.
-- For a fixed iteration count and seed, the output is always identical.
-- Iteration depth directly controls geometric complexity.
+For the baseline dragon curve:
+- Turn count at iteration `n` is `2^n − 1`
+- Segment count is `2^n` (initial step + one segment per turn)
 
-At iteration 15, the baseline produces a very dense, space-filling curve because all recursive turns are executed.
+### 2) Walking the turns into geometry (polyline)
+`build_points(...)` converts the turn list into a polyline:
 
----
+- Start at `(0, 0)` with an initial forward step
+- For each turn:
+  - update heading (E/N/W/S)
+  - take one step of length `STEP`
+  - append the new point
 
-## 2. Self-avoidance: Hard geometric constraint
-
-### Logic
-The self-avoid variant introduces a collision check before committing each new segment.
-
-- Each candidate segment is tested against all previous segments.
-- If an intersection is detected, the step is rejected.
-- When STOP_ON_COLLISION = False, the system skips the colliding step and attempts to continue.
-
-### Consequences
-- The recursion is still generated, but not all turns are realized geometrically.
-- Once the curve reaches a configuration where every remaining turn would cause a collision, growth can no longer proceed.
-
-### Important observation
-For higher iteration counts (e.g. 15):
-
-- The self-avoid version often terminates early.
-- Iteration 15 may produce the same geometry as iteration 10 because no further valid steps exist.
-- This is not a bug. It is a geometric saturation effect caused by strict self-intersection avoidance.
+The polyline is rendered as connected line segments.
 
 ---
 
-## 3. Attractor: Soft spatial bias
+## Variants (what changes between outputs)
 
-### Logic
-The attractor variant introduces a probabilistic steering influence toward a fixed point in space.
+### A) `baseline`
+**Pure recursion.**  
+All turns are executed exactly as defined by the recursion. No turns are modified or rejected.
 
-For each recursive turn:
-- The algorithm compares the planned turn with its flipped alternative.
-- Both options are evaluated based on alignment with the attractor direction.
-- A probability of flipping the turn is computed using BIAS_STRENGTH.
+### B) `self_avoid`
+**Hard geometric constraint.**  
+Each candidate segment is checked against previous segments. If an intersection is detected:
+- `STOP_ON_COLLISION = False`: the step is **skipped** and growth continues.
 
-Key point:
-- The recursive turn sequence is treated as a proposal, not a rule.
+**Why iteration 15 can look like iteration 10:**  
+Once the geometry reaches a state where **every remaining candidate step would collide**, growth cannot add new valid segments. At that point, increasing the iteration count does not increase realized geometry.
 
-### Consequences
-- The recursion is no longer strictly deterministic.
-- Small turn changes at early iterations propagate exponentially.
-- The curve spreads outward toward the attractor instead of folding inward.
+### C) `attractor`
+**Soft spatial bias.**  
+For each recursive turn, the algorithm evaluates the planned turn versus its flipped alternative (L ↔ R). If flipping improves alignment with the direction toward the attractor point, the turn is flipped with probability:
 
-### Why iteration 15 differs from the baseline
-Although both are labeled “iteration 15”:
+- `p_flip = min(1, BIAS_STRENGTH * improvement / 2)`
 
-- Baseline executes all 2^15 − 1 turns exactly as defined.
-- Attractor alters turn decisions dynamically, breaking self-similarity.
+This treats recursion as a **proposal** and introduces controlled stochastic deviation.
 
-As a result:
-- The number, placement, and density of visible segments differ.
-- The attractor curve is not expected to match or build on the baseline.
+**Why baseline iteration 15 does not match attractor iteration 15:**  
+Baseline executes the canonical `2^15 − 1` turns deterministically.  
+Attractor modifies turns during growth, breaking strict self-similarity and producing a different spatial trajectory and density.
 
----
+### D) `attractor_self_avoid`
+**Combined rules.**
+1) optional turn flip (attractor bias)  
+2) collision test (self-avoid)  
+3) skip colliding steps
 
-## 4. Attractor + self-avoid: Combined rules
-
-### Logic
-This variant combines:
-- Soft influence (attractor bias)
-- Hard constraint (self-intersection avoidance)
-
-The algorithm:
-1. Proposes a recursive turn
-2. Optionally flips it based on attractor alignment
-3. Rejects the step if it causes a collision
-
-### Consequences
-- Growth becomes highly path-dependent.
-- Some recursive steps are modified; others are skipped entirely.
-- The curve may terminate early once no valid steps remain.
+This produces the strongest divergence and can also saturate early if no collision-free steps remain.
 
 ---
 
-## 5. Reproducibility
-
-- A fixed random seed (SEED = 42) is used.
-- For attractor-based runs, the seed is reset before each variant.
-- This guarantees identical results across runs while still allowing stochastic behavior.
+## Reproducibility
+- `SEED` controls all stochastic decisions.
+- The seed is reset before each attractor-based run so that increasing iteration depth behaves like consistent “growth” of the same biased system.
 
 ---
 
-## 6. Results
+## How to run
 
-### Baseline (iteration 15)
-![](images/baseline_iterations15_seed42.png)
+From inside the `A2/` folder:
 
-### Self-avoid (iteration 15 — early termination)
-![](images/self_avoid_iterations15_seed42.png)
+```bash
+python fractal_generator.py
+```
 
-### Attractor (iteration 15)
-![](images/attractor_iterations15_seed42.png)
+Images are saved to:
 
-### Attractor + self-avoid (iteration 15)
-![](images/attractor_self_avoid_iterations15_seed42.png)
-
-### Attractor + self-avoid across iterations
-Iteration 3  
-![](images/attractor_self_avoid_iterations3_seed42.png)
-
-Iteration 7  
-![](images/attractor_self_avoid_iterations7_seed42.png)
-
-Iteration 10  
-![](images/attractor_self_avoid_iterations10_seed42.png)
-
-Iteration 15  
-![](images/attractor_self_avoid_iterations15_seed42.png)
+```
+A2/images/
+```
 
 ---
 
-## 7. Key takeaway
+## Output gallery (all variants × all iterations)
 
-- Recursion alone produces predictable, self-similar structures.
-- Hard constraints can prematurely terminate recursive growth.
-- Soft biases reshape recursion without explicit rules.
-- Combining both leads to emergent, non-trivial geometries.
+Filenames follow:
 
-Iteration depth alone does not guarantee comparable results once recursion is influenced by spatial rules.
+`<variant>_iterations<N>_seed42.png`
+
+### Iteration 3
+
+| baseline | self_avoid |
+| --- | --- |
+| ![](images/baseline_iterations3_seed42.png) | ![](images/self_avoid_iterations3_seed42.png) |
+
+| attractor | attractor_self_avoid |
+| --- | --- |
+| ![](images/attractor_iterations3_seed42.png) | ![](images/attractor_self_avoid_iterations3_seed42.png) |
+
+### Iteration 7
+
+| baseline | self_avoid |
+| --- | --- |
+| ![](images/baseline_iterations7_seed42.png) | ![](images/self_avoid_iterations7_seed42.png) |
+
+| attractor | attractor_self_avoid |
+| --- | --- |
+| ![](images/attractor_iterations7_seed42.png) | ![](images/attractor_self_avoid_iterations7_seed42.png) |
+
+### Iteration 10
+
+| baseline | self_avoid |
+| --- | --- |
+| ![](images/baseline_iterations10_seed42.png) | ![](images/self_avoid_iterations10_seed42.png) |
+
+| attractor | attractor_self_avoid |
+| --- | --- |
+| ![](images/attractor_iterations10_seed42.png) | ![](images/attractor_self_avoid_iterations10_seed42.png) |
+
+### Iteration 15
+
+| baseline | self_avoid |
+| --- | --- |
+| ![](images/baseline_iterations15_seed42.png) | ![](images/self_avoid_iterations15_seed42.png) |
+
+| attractor | attractor_self_avoid |
+| --- | --- |
+| ![](images/attractor_iterations15_seed42.png) | ![](images/attractor_self_avoid_iterations15_seed42.png) |
+
+---
+
+## Parameters used for these results
+
+- `SEED = 42`
+- `STEP = 1.0`
+- `ITERATION_LIST = [3, 7, 10, 15]`
+- `AVOID_SELF = True`
+- `STOP_ON_COLLISION = False`
+- `ATTRACTOR = (20.0, 20.0)`
+- `BIAS_STRENGTH = 0.35`
