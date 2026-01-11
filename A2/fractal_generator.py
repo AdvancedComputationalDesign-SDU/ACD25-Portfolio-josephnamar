@@ -211,19 +211,24 @@ if __name__ == "__main__":
 
         # attractor only
         BASE_TITLE = "attractor"
+        np.random.seed(SEED)
         points = build_points(
-            turns, step=STEP, avoid_self=False,
-            use_attractor=USE_ATTRACTOR, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
+            turns, step=STEP,
+            avoid_self=False,
+            use_attractor=True, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
         )
         output(points)
 
-        # attractor + self_avoid
+        # attractor + self avoid
         BASE_TITLE = "attractor_self_avoid"
+        np.random.seed(SEED)
         points = build_points(
-            turns, step=STEP, avoid_self=True, stop_on_collision=STOP_ON_COLLISION,
-            use_attractor=USE_ATTRACTOR, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
+            turns, step=STEP,
+            avoid_self=True, stop_on_collision=STOP_ON_COLLISION,
+            use_attractor=True, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
         )
         output(points)
+
 
 
 
