@@ -7,9 +7,9 @@ from shapely.geometry import LineString
 # =========================
 # CONFIG
 # =========================
-MODE = "vis"   # "vis" or "save"
+MODE = "save"   # "vis" or "save"
 SEED = 42
-ITERATION_LIST = [3, 7, 10]
+ITERATION_LIST = [3, 7, 10, 15]
 STEP = 1.0
 
 AVOID_SELF = True          # True: avoid self-intersection, False: allow self-intersection
@@ -217,13 +217,13 @@ if __name__ == "__main__":
         )
         output(points)
 
-        # # attractor + self_avoid
-        # BASE_TITLE = "attractor_self_avoid"
-        # points = build_points(
-        #     turns, step=STEP, avoid_self=True, stop_on_collision=STOP_ON_COLLISION,
-        #     use_attractor=USE_ATTRACTOR, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
-        # )
-        # output(points)
+        # attractor + self_avoid
+        BASE_TITLE = "attractor_self_avoid"
+        points = build_points(
+            turns, step=STEP, avoid_self=True, stop_on_collision=STOP_ON_COLLISION,
+            use_attractor=USE_ATTRACTOR, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
+        )
+        output(points)
 
 
 
