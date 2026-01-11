@@ -1,13 +1,13 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from shapely.geometry import LineString
 from matplotlib.collections import LineCollection
 
 # =========================
 # CONFIG
 # =========================
-SEED = 0
+MODE = "vis"   # "vis" or "save"
+SEED = 42
 ITERATIONS = 3
 STEP = 1.0
 
@@ -26,7 +26,8 @@ def dragon_turns(n):
         return []
     prev = dragon_turns(n - 1)
     inv_rev = [-t for t in reversed(prev)]
-    return prev + [1] + inv_rev
+    # 0:E, 1:N, 2:W, 3:S
+    return prev + [1] + inv_rev 
 
 
 # =========================
@@ -46,6 +47,7 @@ def build_points(turns, step=1.0):
             return (-step, 0.0)
         return (0.0, -step)
 
+    # initial forward segment
     dx, dy = step_vec(heading)
     x += dx
     y += dy
@@ -62,34 +64,43 @@ def build_points(turns, step=1.0):
 
 
 # =========================
-# COLORED PLOTTING
+# OUTPUT (vis or save)
 # =========================
-def save_colored(points, out_path):
+def output_colored(points, out_path=None, title=None):
     # Build line segments [(p0,p1), (p1,p2), ...]
-    segments = [
-        [points[i], points[i + 1]]
-        for i in range(len(points) - 1)
-    ]
-
-    # Color index per segment
+    segments = [[points[i], points[i + 1]] for i in range(len(points) - 1)]
     values = np.arange(len(segments))
 
-    lc = LineCollection(
-        segments,
-        cmap="viridis",
-        linewidth=1.0
-    )
+    lc = LineCollection(segments, cmap="viridis", linewidth=1.0)
     lc.set_array(values)
 
     fig, ax = plt.subplots()
     ax.add_collection(lc)
-
     ax.set_aspect("equal", adjustable="box")
     ax.autoscale()
     ax.axis("off")
 
-    fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
+    # --- annotation below the figure ---
+    fig.text(
+        0.5,
+        0.02,
+        f"iterations = {ITERATIONS}   |   seed = {SEED}",
+        ha="center",
+        va="center",
+        fontsize=9
+    )
+
+    if MODE == "vis":
+        plt.show()
+        plt.close(fig)
+    elif MODE == "save":
+        if out_path is None:
+            raise ValueError("out_path must be provided when MODE='save'")
+        fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
+        plt.close(fig)
+    else:
+        plt.close(fig)
+        raise ValueError("MODE must be 'vis' or 'save'")
 
 
 # =========================
@@ -100,6 +111,9 @@ if __name__ == "__main__":
     points = build_points(turns, step=STEP)
 
     out_path = os.path.join(OUT_DIR, OUT_NAME)
-    save_colored(points, out_path)
 
-    print(f"Saved: {out_path}")
+    if MODE == "save":
+        output_colored(points, out_path=out_path)
+        print(f"Saved: {out_path}")
+    else:
+        output_colored(points, title=f"Dragon curve (iterations={ITERATIONS})")
