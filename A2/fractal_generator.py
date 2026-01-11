@@ -2,14 +2,19 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from shapely.geometry import LineString
 
 # =========================
 # CONFIG
 # =========================
 MODE = "vis"   # "vis" or "save"
 SEED = 42
-ITERATIONS = [3, 7, 14]  
+ITERATION_LIST = [3, 7, 10]
 STEP = 1.0
+
+AVOID_SELF = True          # True: avoid self-intersection, False: allow self-intersection
+STOP_ON_COLLISION = False  
+
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "images")
 BASE_TITLE = "Dragon curve"
@@ -40,7 +45,7 @@ def dragon_turns(n):
 # =========================
 # BUILD POINTS
 # =========================
-def build_points(turns, step=1.0):
+def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True):
     heading = 0  # 0:E, 1:N, 2:W, 3:S
     x, y = 0.0, 0.0
     pts = [(x, y)]
@@ -54,26 +59,55 @@ def build_points(turns, step=1.0):
             return (-step, 0.0)
         return (0.0, -step)
 
+    # Keep existing segments as tuples of points: [((x0,y0),(x1,y1)), ...]
+    segments = []
+
     # initial forward segment
     dx, dy = step_vec(heading)
-    x += dx
-    y += dy
+    x2, y2 = x + dx, y + dy
+
+    # add initial segment
+    segments.append(((x, y), (x2, y2)))
+    x, y = x2, y2
     pts.append((x, y))
 
     for t in turns:
         heading = (heading + t) % 4
         dx, dy = step_vec(heading)
-        x += dx
-        y += dy
+        nx, ny = x + dx, y + dy
+
+        if avoid_self:
+            # candidate new segment
+            cand = LineString([(x, y), (nx, ny)])
+
+            # check against all older segments except the most recent one
+            # (adjacent segment shares endpoint; that's always "intersecting")
+            collision = False
+            for (p0, p1) in segments[:-1]:
+                old = LineString([p0, p1])
+                if cand.intersects(old):
+                    collision = True
+                    break
+
+            if collision:
+                if stop_on_collision:
+                    break
+                else:
+                    # skip this step and continue to next turn
+                    continue
+
+        segments.append(((x, y), (nx, ny)))
+        x, y = nx, ny
         pts.append((x, y))
 
     return pts
 
 
+
 # =========================
 # OUTPUT (vis or save)
 # =========================
-def output_colored(points, out_path=None, title=None):
+def output(points, out_path=None, title=None):
     # Build line segments 
     segments = [[points[i], points[i + 1]] for i in range(len(points) - 1)]
     values = np.arange(len(segments))
@@ -94,7 +128,7 @@ def output_colored(points, out_path=None, title=None):
     fig.text(
         0.5,
         0.02,
-        f"iterations = {ITERATIONS}   |   seed = {SEED}",
+        full_title,
         ha="center",
         va="center",
         fontsize=9
@@ -119,12 +153,19 @@ def output_colored(points, out_path=None, title=None):
 # =========================
 if __name__ == "__main__":
 
-    for i in ITERATIONS:
-        ITERATIONS = i 
-
+    for i in ITERATION_LIST:
+        ITERATIONS = i
         turns = dragon_turns(ITERATIONS)
-        points = build_points(turns, step=STEP)
 
-        output_colored(points, BASE_TITLE)
+        # baseline (no collision avoidance)
+        BASE_TITLE = "baseline"
+        points = build_points(turns, step=STEP, avoid_self=False)
+        output(points)
+
+        # self-avoid version
+        BASE_TITLE = "self_avoid"
+        points = build_points(turns, step=STEP, avoid_self=True, stop_on_collision=STOP_ON_COLLISION)
+        output(points)
+
 
 
