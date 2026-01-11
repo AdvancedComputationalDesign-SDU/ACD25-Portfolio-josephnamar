@@ -8,14 +8,20 @@ from matplotlib.collections import LineCollection
 # =========================
 MODE = "vis"   # "vis" or "save"
 SEED = 42
-ITERATIONS = 3
+ITERATIONS = 4
 STEP = 1.0
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "images")
-OUT_NAME = "a2_01_baseline_colored.png"
+BASE_TITLE = "Dragon curve"
 
 os.makedirs(OUT_DIR, exist_ok=True)
 np.random.seed(SEED)
+
+# =========================
+# OUTPUT TITLE
+# =========================
+def make_title(base):
+    return f"{base} | iterations={ITERATIONS} | seed={SEED}"
 
 
 # =========================
@@ -80,6 +86,8 @@ def output_colored(points, out_path=None, title=None):
     ax.autoscale()
     ax.axis("off")
 
+    full_title = make_title(BASE_TITLE)
+
     # --- annotation below the figure ---
     fig.text(
         0.5,
@@ -94,10 +102,11 @@ def output_colored(points, out_path=None, title=None):
         plt.show()
         plt.close(fig)
     elif MODE == "save":
-        if out_path is None:
-            raise ValueError("out_path must be provided when MODE='save'")
-        fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0)
+        filename = full_title.replace(" ", "").replace("|", "_").replace("=", "")
+        out_path = os.path.join(OUT_DIR, f"{filename}.png")
+        fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.1)
         plt.close(fig)
+        print(f"Saved: {out_path}")
     else:
         plt.close(fig)
         raise ValueError("MODE must be 'vis' or 'save'")
@@ -110,10 +119,9 @@ if __name__ == "__main__":
     turns = dragon_turns(ITERATIONS)
     points = build_points(turns, step=STEP)
 
-    out_path = os.path.join(OUT_DIR, OUT_NAME)
+    output_colored(points, BASE_TITLE)
 
-    if MODE == "save":
-        output_colored(points, out_path=out_path)
-        print(f"Saved: {out_path}")
-    else:
-        output_colored(points, title=f"Dragon curve (iterations={ITERATIONS})")
+    # if MODE == "save":
+    #     output_colored(points, BASE_TITLE)
+    # else:
+    #     output_colored(points, title=f"Dragon curve (iterations={ITERATIONS})")
