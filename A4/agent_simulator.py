@@ -1,56 +1,62 @@
 """
 Assignment 4: Agent-Based Model for Surface Panelization
-Agent Simulator (edge-triggered step)
+Author: Your Name
+
+Agent Simulator (Mode B – edge-triggered, RhinoCommon-only)
 """
 
-import rhinoscriptsyntax as rs
+# -----------------------------------------------------------------------------
+# Imports
+# -----------------------------------------------------------------------------
 import scriptcontext as sc
+import Rhino.Geometry as rg
 
-# -------------------------------------------------------------------------
-# Retrieve agents
-# -------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Retrieve agents from builder
+# -----------------------------------------------------------------------------
 agents = None
 if x is not None and hasattr(x, "agents"):
     agents = x.agents
 
-# -------------------------------------------------------------------------
-# Persistent storage for previous step value
-# -------------------------------------------------------------------------
-if "prev_step" not in sc.sticky:
+# -----------------------------------------------------------------------------
+# Reset step memory when agent set changes
+# -----------------------------------------------------------------------------
+if "agents_id" not in sc.sticky:
+    sc.sticky["agents_id"] = None
     sc.sticky["prev_step"] = False
 
-prev_step = sc.sticky["prev_step"]
+current_id = id(agents)
 
-# -------------------------------------------------------------------------
-# Detect rising edge: False -> True
-# -------------------------------------------------------------------------
+if sc.sticky["agents_id"] != current_id:
+    sc.sticky["agents_id"] = current_id
+    sc.sticky["prev_step"] = False
+
+# -----------------------------------------------------------------------------
+# Edge-triggered stepping (False → True)
+# -----------------------------------------------------------------------------
+prev_step = sc.sticky["prev_step"]
 do_step = (step is True) and (prev_step is False)
 
-# -------------------------------------------------------------------------
-# Step simulation (exactly once per click)
-# -------------------------------------------------------------------------
 if agents is not None and do_step:
     for agent in agents:
         agent.update(agents)
 
-# store current step state
 sc.sticky["prev_step"] = step
 
-# -------------------------------------------------------------------------
-# Visualization
-# -------------------------------------------------------------------------
-P = []
-V = []
+# -----------------------------------------------------------------------------
+# Visualization (RhinoCommon ONLY — no document writes)
+# -----------------------------------------------------------------------------
+P = []  # agent positions (Point3d)
+V = []  # velocity vectors (Line)
 
 if agents is not None:
     for agent in agents:
         pos = agent.position
         vel = agent.velocity
 
-        P.append(rs.AddPoint(pos.X, pos.Y, pos.Z))
+        # output position
+        P.append(pos)
 
-        end = pos + vel
-        V.append(rs.AddLine(
-            (pos.X, pos.Y, pos.Z),
-            (end.X, end.Y, end.Z)
-        ))
+        # output velocity only if non-zero
+        if vel.Length > 1e-9:
+            V.append(rg.Line(pos, pos + vel))
