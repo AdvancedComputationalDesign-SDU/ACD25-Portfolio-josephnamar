@@ -7,6 +7,25 @@ nav_exclude: false
 search_exclude: false
 ---
 
+# Assignment 1: NumPy Array Manipulation for 2D Pattern Generation
+
+
+![Assignment overview](images/ex02_perlin_moire.png)
+
+---
+
+## Table of Contents
+- [Overview](#overview)
+- [Method](#method)
+  - [Example 01: Gradient, Stripes, and Cross Intervention](#example-01-gradient-stripes-and-cross-intervention)
+  - [Example 02: Perlin Noise and Channel Manipulation](#example-02-perlin-noise-and-channel-manipulation)
+- [Results](#results)
+- [Discussion](#discussion)
+- [Reproducibility](#reproducibility)
+- [AI Use](#ai-use)
+
+---
+
 ## Overview
 
 This assignment investigates pixel-based pattern generation using NumPy array
