@@ -10,7 +10,7 @@ search_exclude: false
 # Assignment 1: NumPy Array Manipulation for 2D Pattern Generation
 
 
-![Assignment overview](images/ex02_perlin_moire.png)
+![Assignment overview](images/perlin_moire.png)
 
 ---
 
