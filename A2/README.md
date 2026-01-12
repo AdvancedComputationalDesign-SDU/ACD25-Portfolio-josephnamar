@@ -1,155 +1,208 @@
-# A2 — Recursive Fractal System (Dragon Curve)
+---
+layout: default
+title: Project Documentation
+parent: "A2: Exploring Fractals through Recursive Geometric Patterns"
+nav_order: 2
+nav_exclude: false
+search_exclude: false
+---
 
-This assignment explores a **recursive fractal system** based on the *Heighway dragon curve* and investigates how introducing **geometric constraints and spatial bias** alters recursive growth.
+# Assignment 2: Exploring Fractals through Recursive Geometric Patterns
 
-The script generates and saves four variants (**baseline**, **self_avoid**, **attractor**, **attractor_self_avoid**) for multiple recursion depths (**iterations = 3, 7, 10, 15**).
+
+![Assignment overview](images/branching.png)
 
 ---
 
-## Core logic (shared by all variants)
-
-### 1) Recursive turn sequence (the “DNA”)
-The dragon curve is defined by a turn sequence of **left/right 90° turns**.  
-`dragon_turns(n)` builds this sequence recursively:
-
-- Base: `S(0) = []`
-- Recurrence:
-  - `S(n) = S(n-1) + [L] + invert(reverse(S(n-1)))`
-
-In the code:
-- `+1` encodes a **left** turn
-- `-1` encodes a **right** turn
-- `invert` is implemented by multiplying turns by `-1`
-
-For the baseline dragon curve:
-- Turn count at iteration `n` is `2^n − 1`
-- Segment count is `2^n` (initial step + one segment per turn)
-
-### 2) Walking the turns into geometry (polyline)
-`build_points(...)` converts the turn list into a polyline:
-
-- Start at `(0, 0)` with an initial forward step
-- For each turn:
-  - update heading (E/N/W/S)
-  - take one step of length `STEP`
-  - append the new point
-
-The polyline is rendered as connected line segments.
+## Table of Contents
+- [Overview](#overview)
+- [Method](#method)
+  - [Recursive Turn Generation](#recursive-turn-generation)
+  - [From Turns to Geometry](#from-turns-to-geometry)
+  - [Baseline Recursive Growth](#baseline-recursive-growth)
+  - [Self-Avoiding Growth](#self-avoiding-growth)
+  - [Attractor-Driven Growth](#attractor-driven-growth)
+  - [Attractor with Self-Avoidance](#attractor-with-self-avoidance)
+- [Results](#results)
+- [Discussion](#discussion)
+- [Reproducibility](#reproducibility)
+- [AI Use](#ai-use)
 
 ---
 
-## Variants (what changes between outputs)
+## Overview
 
-### A) `baseline`
-**Pure recursion.**  
-All turns are executed exactly as defined by the recursion. No turns are modified or rejected.
+This assignment investigates a recursive geometric system based on the
+Heighway dragon curve. Starting from a deterministic recursive definition,
+the system is progressively modified by introducing geometric constraints
+and spatial bias.
 
-### B) `self_avoid`
-**Hard geometric constraint.**  
-Each candidate segment is checked against previous segments. If an intersection is detected:
-- `STOP_ON_COLLISION = False`: the step is **skipped** and growth continues.
+Four pattern variants are generated and compared across increasing iteration
+depths (3, 7, 10, and 15):
 
-**Why iteration 15 can look like iteration 10:**  
-Once the geometry reaches a state where **every remaining candidate step would collide**, growth cannot add new valid segments. At that point, increasing the iteration count does not increase realized geometry.
+1. A baseline recursive dragon curve.
+2. A self-avoiding variant that rejects self-intersecting segments.
+3. An attractor-driven variant that biases growth toward a target point.
+4. A combined attractor and self-avoiding variant.
 
-### C) `attractor`
-**Soft spatial bias.**  
-For each recursive turn, the algorithm evaluates the planned turn versus its flipped alternative (L ↔ R). If flipping improves alignment with the direction toward the attractor point, the turn is flipped with probability:
-
-- `p_flip = min(1, BIAS_STRENGTH * improvement / 2)`
-
-This treats recursion as a **proposal** and introduces controlled stochastic deviation.
-
-**Why baseline iteration 15 does not match attractor iteration 15:**  
-Baseline executes the canonical `2^15 − 1` turns deterministically.  
-Attractor modifies turns during growth, breaking strict self-similarity and producing a different spatial trajectory and density.
-
-### D) `attractor_self_avoid`
-**Combined rules.**
-1) optional turn flip (attractor bias)  
-2) collision test (self-avoid)  
-3) skip colliding steps
-
-This produces the strongest divergence and can also saturate early if no collision-free steps remain.
+The objective is to examine how local rule modifications influence recursive
+growth, geometric saturation, and global structure.
 
 ---
 
-## Reproducibility
-- `SEED` controls all stochastic decisions.
-- The seed is reset before each attractor-based run so that increasing iteration depth behaves like consistent “growth” of the same biased system.
+## Method
+
+### Recursive Turn Generation
+
+The dragon curve is defined by a recursive sequence of left and right turns.
+At each iteration, the previous sequence is extended by appending a left turn
+followed by the inverted and reversed version of the previous sequence.
+
+This process produces a turn sequence of length `2^n − 1` at iteration `n`,
+which defines the intended growth direction at each step.
 
 ---
 
-## How to run
+### From Turns to Geometry
 
-From inside the `A2/` folder:
+The turn sequence is converted into geometry using a step-based walker.
+Starting from an initial position and heading, each turn updates the heading
+and advances the walker by a fixed step length.
 
-```bash
-python fractal_generator.py
-```
-
-Images are saved to:
-
-```
-A2/images/
-```
+The resulting geometry is a polyline composed of axis-aligned segments.
+All variants share this construction logic.
 
 ---
 
-## Output gallery (all variants × all iterations)
+### Baseline Recursive Growth
 
-Filenames follow:
+The baseline variant executes the recursive turn sequence exactly as defined.
+No turns are modified or rejected, and all steps are realized geometrically.
 
-`<variant>_iterations<N>_seed42.png`
+This produces a fully deterministic and self-similar fractal structure, where
+increasing iteration depth directly increases geometric complexity.
+
+---
+
+### Self-Avoiding Growth
+
+The self-avoid variant introduces a hard geometric constraint by rejecting any
+step that would cause a self-intersection.
+
+Each candidate segment is tested against all previously accepted segments.
+If an intersection is detected, the step is skipped and the system attempts
+to continue with subsequent turns.
+
+At higher iteration depths, the curve may reach a saturated configuration
+where no further non-intersecting steps are possible. In such cases, increasing
+the iteration count does not increase realized geometry, and higher iterations
+may produce identical results to lower ones.
+
+---
+
+### Attractor-Driven Growth
+
+The attractor variant introduces a soft spatial bias toward a fixed point.
+For each recursive turn, the planned turn is compared with its flipped
+alternative. Both options are evaluated based on their alignment with the
+direction toward the attractor.
+
+If flipping the turn improves alignment, the turn may be flipped with a
+probability controlled by a bias strength parameter.
+
+This breaks the strict determinism of the recursive process while preserving
+its overall structure.
+
+---
+
+### Attractor with Self-Avoidance
+
+The final variant combines the attractor bias with self-intersection avoidance.
+
+Turn decisions may be modified by the attractor, but resulting steps are still
+subject to collision checks. Steps that would cause intersections are skipped.
+
+This combination produces the strongest divergence from the baseline behavior
+and may terminate early when no valid steps remain.
+
+---
+
+## Results
 
 ### Iteration 3
 
-| baseline | self_avoid |
+| Baseline | Self-Avoid |
 | --- | --- |
 | ![](images/baseline_iterations3_seed42.png) | ![](images/self_avoid_iterations3_seed42.png) |
 
-| attractor | attractor_self_avoid |
+| Attractor | Attractor + Self-Avoid |
 | --- | --- |
 | ![](images/attractor_iterations3_seed42.png) | ![](images/attractor_self_avoid_iterations3_seed42.png) |
 
+---
+
 ### Iteration 7
 
-| baseline | self_avoid |
+| Baseline | Self-Avoid |
 | --- | --- |
 | ![](images/baseline_iterations7_seed42.png) | ![](images/self_avoid_iterations7_seed42.png) |
 
-| attractor | attractor_self_avoid |
+| Attractor | Attractor + Self-Avoid |
 | --- | --- |
 | ![](images/attractor_iterations7_seed42.png) | ![](images/attractor_self_avoid_iterations7_seed42.png) |
 
+---
+
 ### Iteration 10
 
-| baseline | self_avoid |
+| Baseline | Self-Avoid |
 | --- | --- |
 | ![](images/baseline_iterations10_seed42.png) | ![](images/self_avoid_iterations10_seed42.png) |
 
-| attractor | attractor_self_avoid |
+| Attractor | Attractor + Self-Avoid |
 | --- | --- |
 | ![](images/attractor_iterations10_seed42.png) | ![](images/attractor_self_avoid_iterations10_seed42.png) |
 
+---
+
 ### Iteration 15
 
-| baseline | self_avoid |
+| Baseline | Self-Avoid |
 | --- | --- |
 | ![](images/baseline_iterations15_seed42.png) | ![](images/self_avoid_iterations15_seed42.png) |
 
-| attractor | attractor_self_avoid |
+| Attractor | Attractor + Self-Avoid |
 | --- | --- |
 | ![](images/attractor_iterations15_seed42.png) | ![](images/attractor_self_avoid_iterations15_seed42.png) |
 
 ---
 
-## Parameters used for these results
+## Discussion
 
-- `SEED = 42`
-- `STEP = 1.0`
-- `ITERATION_LIST = [3, 7, 10, 15]`
-- `AVOID_SELF = True`
-- `STOP_ON_COLLISION = False`
-- `ATTRACTOR = (20.0, 20.0)`
-- `BIAS_STRENGTH = 0.35`
+The baseline results demonstrate the predictable behavior of a purely recursive
+system. Introducing self-avoidance shows how hard geometric constraints can
+override recursive intent and lead to early saturation.
+
+The attractor-based variants illustrate how soft spatial bias alters recursive
+growth without explicitly redefining the recursion itself. Small turn
+modifications propagate through subsequent steps, resulting in significant
+geometric divergence at higher iterations.
+
+Together, the results demonstrate how recursive systems are highly sensitive to
+local rule changes and geometric constraints.
+
+---
+
+## Reproducibility
+
+All stochastic processes use a fixed random seed (`SEED = 42`). For attractor-
+based variants, the seed is reset before each run to ensure consistent behavior
+across iteration depths.
+
+---
+
+## AI Use
+
+AI tools were used to assist with debugging, code refinement, and documentation
+structuring. All algorithmic decisions, parameter choices, and visual evaluation
+were performed by the student.
