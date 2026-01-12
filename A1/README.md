@@ -7,25 +7,6 @@ nav_exclude: false
 search_exclude: false
 ---
 
-# Assignment 1: NumPy Array Manipulation for 2D Pattern Generation
-
-
-![Assignment overview](images/ex02_perlin_base.png)
-
----
-
-## Table of Contents
-- [Overview](#overview)
-- [Method](#method)
-  - [Example 01: Gradient, Stripes, and Cross Intervention](#example-01-gradient-stripes-and-cross-intervention)
-  - [Example 02: Perlin Noise and Channel Manipulation](#example-02-perlin-noise-and-channel-manipulation)
-- [Results](#results)
-- [Discussion](#discussion)
-- [Reproducibility](#reproducibility)
-- [AI Use](#ai-use)
-
----
-
 ## Overview
 
 This assignment investigates pixel-based pattern generation using NumPy array
@@ -139,4 +120,12 @@ powerful tools for pattern generation.
 
 All stochastic processes use a fixed random seed (`SEED = 0`). Changing the seed
 produces different noise realizations while preserving the same computational
-logic. Image resolution and all parameters are explicitl
+logic. Image resolution and all parameters are explicitly defined in the script.
+
+---
+
+## AI Use
+
+AI tools were used to assist with debugging, code cleanup, and documentation
+structuring. All pattern logic, parameter choices, and visual evaluation were
+performed by the student.
