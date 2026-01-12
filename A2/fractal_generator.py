@@ -4,20 +4,37 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from shapely.geometry import LineString
 
+"""
+Assignment A2 – Fractal Generator
+
+This script generates 2D dragon-curve based fractal patterns using a recursive
+turn sequence and a turtle-style path construction. Several controlled
+variations are produced to explore constraints (self-avoidance) and steering
+effects (attractor bias).
+
+Output is visualized or saved depending on MODE.
+"""
+
 # =========================
-# CONFIG
+# GLOBAL CONFIGURATION
 # =========================
+# Execution mode: visualize ("vis") or save images ("save")
 MODE = "save"   # "vis" or "save"
+# Random seed for reproducible stochastic behavior
 SEED = 42
+# Iteration counts to generate (higher = more segments)
 ITERATION_LIST = [3, 7, 10, 15]
+# Step length per move
 STEP = 1.0
 
+# Self-intersection control
 AVOID_SELF = True          # True: avoid self-intersection, False: allow self-intersection
 STOP_ON_COLLISION = False  
 
-# Repulsion settings
+# Attractor bias parameters
 USE_ATTRACTOR = True
 ATTRACTOR = (20.0, 20.0)   # move this to shape composition
+# Strength of attractor influence (0 = none, 1 = strong)
 BIAS_STRENGTH = 0.35       # 0.2 subtle, 0.35 good, 0.6 strong
 
 
@@ -37,7 +54,7 @@ def make_title(base):
 
 
 # =========================
-# DRAGON TURN SEQUENCE
+# FRACTAL RULE GENERATION
 # =========================
 def dragon_turns(n):
     if n <= 0:
@@ -49,12 +66,16 @@ def dragon_turns(n):
 
 
 # =========================
-# BUILD POINTS
+# PATH CONSTRUCTION
 # =========================
 def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True,
                  use_attractor=False, attractor=(0.0, 0.0), bias_strength=0.0):
+    """
+    Build a polyline from a dragon-curve turn sequence.
+    """
 
-    heading = 0  # 0:E, 1:N, 2:W, 3:S
+    # Current heading (0=E, 1=N, 2=W, 3=S)
+    heading = 0  
     x, y = 0.0, 0.0
     pts = [(x, y)]
 
@@ -67,33 +88,30 @@ def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True,
             return (-step, 0.0)
         return (0.0, -step)
 
-    # Keep existing segments as tuples of points: [((x0,y0),(x1,y1)), ...]
+    # Store previous segments for collision checks
     segments = []
 
-    # initial forward segment
     dx, dy = step_vec(heading)
     x2, y2 = x + dx, y + dy
 
-    # add initial segment
-    segments.append(((x, y), (x2, y2)))
     x, y = x2, y2
     pts.append((x, y))
+    segments.append(((0.0, 0.0), (x2, y2)))
 
     for t in turns:
 
         t_use = t
 
         if use_attractor and bias_strength > 0.0:
+            # Optional steering toward attractor
             ax, ay = attractor
 
-            # headings if planned vs flipped
             h_planned = (heading + t) % 4
             h_flipped = (heading - t) % 4
 
             dx_p, dy_p = step_vec(h_planned)
             dx_f, dy_f = step_vec(h_flipped)
 
-            # unit vector pointing toward attractor
             vx, vy = ax - x, ay - y
             n = (vx * vx + vy * vy) ** 0.5
             if n > 1e-9:
@@ -101,29 +119,25 @@ def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True,
             else:
                 vx, vy = 0.0, 0.0
 
-            # alignment scores in [-1, 1]
             score_p = dx_p * vx + dy_p * vy
             score_f = dx_f * vx + dy_f * vy
 
-            improvement = max(0.0, score_f - score_p)  # in [0, 2]
+            improvement = max(0.0, score_f - score_p)
             p_flip = min(1.0, bias_strength * (improvement / 2.0))
 
             if np.random.rand() < p_flip:
                 t_use = -t
 
 
-        # Commit chosen turn
         heading = (heading + t_use) % 4
         dx, dy = step_vec(heading)
         nx, ny = x + dx, y + dy
 
 
         if avoid_self:
-            # candidate new segment
+            # Collision check against previous segments
             cand = LineString([(x, y), (nx, ny)])
 
-            # check against all older segments except the most recent one
-            # (adjacent segment shares endpoint; that's always "intersecting")
             collision = False
             for (p0, p1) in segments[:-1]:
                 old = LineString([p0, p1])
@@ -135,7 +149,6 @@ def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True,
                 if stop_on_collision:
                     break
                 else:
-                    # skip this step and continue to next turn
                     continue
 
         segments.append(((x, y), (nx, ny)))
@@ -147,17 +160,20 @@ def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True,
 
 
 # =========================
-# OUTPUT (vis or save)
+# OUTPUT (VISUALIZE OR SAVE)
 # =========================
 def output(points, out_path=None, title=None):
-    # Build line segments 
+    """
+    Render the polyline and visualize or save the result.
+    """
+    # Build line segments
     segments = [[points[i], points[i + 1]] for i in range(len(points) - 1)]
     values = np.arange(len(segments))
 
     lc = LineCollection(segments, cmap="viridis", linewidth=1.0)
     lc.set_array(values)
 
-    # Create figure and axis
+    # Set up figure and axes
     fig, ax = plt.subplots()
     ax.add_collection(lc)
     ax.set_aspect("equal", adjustable="box")
@@ -166,7 +182,6 @@ def output(points, out_path=None, title=None):
 
     full_title = make_title(BASE_TITLE)
 
-    # Annotation below the figure
     fig.text(
         0.5,
         0.02,
@@ -175,7 +190,7 @@ def output(points, out_path=None, title=None):
         va="center",
         fontsize=9
     )
-    # Visualise or save the figure
+    # Show or save depending on MODE
     if MODE == "vis":
         plt.show()
         plt.close(fig)
@@ -191,7 +206,7 @@ def output(points, out_path=None, title=None):
 
 
 # =========================
-# MAIN
+# MAIN EXECUTION
 # =========================
 if __name__ == "__main__":
 
@@ -199,17 +214,17 @@ if __name__ == "__main__":
         ITERATIONS = i
         turns = dragon_turns(ITERATIONS)
 
-        # baseline (no collision avoidance)
+        # Baseline
         BASE_TITLE = "baseline"
         points = build_points(turns, step=STEP, avoid_self=False)
         output(points)
 
-        # self-avoid version
+        # Self-avoid
         BASE_TITLE = "self_avoid"
         points = build_points(turns, step=STEP, avoid_self=True, stop_on_collision=STOP_ON_COLLISION)
         output(points)
 
-        # attractor only
+        # Attractor
         BASE_TITLE = "attractor"
         np.random.seed(SEED)
         points = build_points(
@@ -219,7 +234,7 @@ if __name__ == "__main__":
         )
         output(points)
 
-        # attractor + self avoid
+        # Attractor + self-avoid
         BASE_TITLE = "attractor_self_avoid"
         np.random.seed(SEED)
         points = build_points(
@@ -228,8 +243,3 @@ if __name__ == "__main__":
             use_attractor=True, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
         )
         output(points)
-
-
-
-
-
