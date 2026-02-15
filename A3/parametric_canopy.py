@@ -165,6 +165,24 @@ def heightmap_local_minima_indices(H):
     minima.sort(key=lambda x: x[2])
     return minima
 
+def dedupe_line_curves(curves, precision=6):
+    out = []
+    seen = set()
+    for c in curves:
+        if c is None:
+            continue
+        p0 = c.PointAtStart
+        p1 = c.PointAtEnd
+        key = (
+            round(p0.X, precision), round(p0.Y, precision), round(p0.Z, precision),
+            round(p1.X, precision), round(p1.Y, precision), round(p1.Z, precision)
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
 def generate_recursive_support_branches(
     root_ground_pts,
     root_top_pts,
@@ -174,9 +192,8 @@ def generate_recursive_support_branches(
     length_reduction,
     branch_start_height
 ):
-    curves = []
     if depth <= 0:
-        return curves
+        return []
 
     def local_frame_from_direction(direction):
         d = rg.Vector3d(direction)
@@ -201,6 +218,8 @@ def generate_recursive_support_branches(
         return x_axis, y_axis
 
     root_count = min(len(root_ground_pts), len(root_top_pts))
+    non_leaf_segments = []
+    leaf_records = []
 
     for idx in range(root_count):
         root_ground = root_ground_pts[idx]
@@ -249,12 +268,29 @@ def generate_recursive_support_branches(
                 new_dir.Unitize()
 
                 end_pt = point + new_dir * float(length)
-                curves.append(rg.Line(point, end_pt).ToNurbsCurve())
-                grow(end_pt, new_dir, level - 1, length * float(length_reduction))
+                seg_curve = rg.Line(point, end_pt).ToNurbsCurve()
+                if level == 1:
+                    leaf_records.append((seg_curve, end_pt, rg.Vector3d(new_dir)))
+                else:
+                    non_leaf_segments.append(seg_curve)
+                    grow(end_pt, new_dir, level - 1, length * float(length_reduction))
 
         grow(start_pt, base_dir, depth, first_len)
 
-    return curves
+    leaf_extension = 10.0
+    accepted = list(non_leaf_segments)
+    for leaf_seg, tip_pt, tip_dir in leaf_records:
+        leaf_start = leaf_seg.PointAtStart
+        ext_dir = rg.Vector3d(tip_dir)
+        if ext_dir.IsZero:
+            continue
+
+        ext_dir.Unitize()
+        extended_tip = tip_pt + ext_dir * leaf_extension
+        if leaf_start.DistanceTo(extended_tip) > 1e-6:
+            accepted.append(rg.Line(leaf_start, extended_tip).ToNurbsCurve())
+
+    return dedupe_line_curves(accepted)
 
 # ---------------------------------------------------------------------------
 # INPUT NORMALIZATION
@@ -351,25 +387,6 @@ if pts_grid and bad_count == 0:
         root_trunks.append(rg.Line(p_ground, p_top).ToNurbsCurve())
 
 # ---------------------------------------------------------------------------
-# RECURSIVE SUPPORT BRANCHES
-# ---------------------------------------------------------------------------
-if root_points and root_points_ground and rec_depth > 0:
-    root_count = min(len(root_points), max_branch_roots)
-    support_branches = generate_recursive_support_branches(
-        root_points_ground[:root_count],
-        root_points[:root_count],
-        rec_depth,
-        n_branches,
-        br_length,
-        len_reduct,
-        branch_start_height
-    )
-else:
-    support_branches = []
-
-supports = list(root_trunks) + list(support_branches)
-
-# ---------------------------------------------------------------------------
 # TESSELLATION
 # ---------------------------------------------------------------------------
 panels = []
@@ -417,6 +434,25 @@ else:
     # Skip tessellation when point sampling is invalid.
     panels = []
     mesh = None
+
+# ---------------------------------------------------------------------------
+# RECURSIVE SUPPORT BRANCHES
+# ---------------------------------------------------------------------------
+if root_points and root_points_ground and rec_depth > 0:
+    root_count = min(len(root_points), max_branch_roots)
+    support_branches = generate_recursive_support_branches(
+        root_points_ground[:root_count],
+        root_points[:root_count],
+        rec_depth,
+        n_branches,
+        br_length,
+        len_reduct,
+        branch_start_height
+    )
+else:
+    support_branches = []
+
+supports = list(root_trunks) + list(support_branches)
 
 # ---------------------------------------------------------------------------
 # FINAL OUTPUTS
