@@ -183,7 +183,7 @@ def dedupe_line_curves(curves, precision=6):
         out.append(c)
     return out
 
-def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3):
+def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=False):
     if not curves:
         return []
     if mesh_obj is None or (not isinstance(mesh_obj, rg.Mesh)) or mesh_obj.Vertices.Count == 0:
@@ -207,29 +207,35 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3):
             hit_raw = None
 
         hit_pts = []
-        if hit_raw is not None:
-            if isinstance(hit_raw, tuple):
-                for item in hit_raw:
-                    if item is None:
-                        continue
-                    try:
-                        for sub in item:
-                            if isinstance(sub, rg.Point3d):
-                                hit_pts.append(sub)
-                    except TypeError:
-                        if isinstance(item, rg.Point3d):
-                            hit_pts.append(item)
-            else:
+        def collect_meshline_hits(obj):
+            if obj is None:
+                return
+            if isinstance(obj, rg.Point3d):
+                hit_pts.append(obj)
+                return
+            if isinstance(obj, (int, float)):
+                t = float(obj)
+                if (-tol <= t) and (t <= 1.0 + tol):
+                    hit_pts.append(line.PointAt(t))
+                return
+            try:
+                it = iter(obj)
+            except TypeError:
                 try:
-                    for sub in hit_raw:
-                        if isinstance(sub, rg.Point3d):
-                            hit_pts.append(sub)
-                except TypeError:
-                    if isinstance(hit_raw, rg.Point3d):
-                        hit_pts.append(hit_raw)
+                    t = float(obj)
+                    if (-tol <= t) and (t <= 1.0 + tol):
+                        hit_pts.append(line.PointAt(t))
+                except:
+                    pass
+                return
+            for sub in it:
+                collect_meshline_hits(sub)
+
+        collect_meshline_hits(hit_raw)
 
         if not hit_pts:
-            trimmed.append(c)
+            if not cull_non_intersecting:
+                trimmed.append(c)
             continue
 
         first_hit = None
@@ -241,7 +247,8 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3):
                 first_hit = hp
 
         if first_hit is None:
-            trimmed.append(c)
+            if not cull_non_intersecting:
+                trimmed.append(c)
             continue
 
         if p0.DistanceTo(first_hit) > tol:
@@ -256,7 +263,9 @@ def generate_recursive_support_branches(
     branches_per_node,
     base_length,
     length_reduction,
-    branch_start_height
+    branch_start_height,
+    trim_mesh=None,
+    trim_tol=1e-3
 ):
     if depth <= 0:
         return []
@@ -344,7 +353,7 @@ def generate_recursive_support_branches(
         grow(start_pt, base_dir, depth, first_len)
 
     leaf_extension = 10.0
-    accepted = list(non_leaf_segments)
+    leaf_segments = []
     for leaf_seg, tip_pt, tip_dir in leaf_records:
         leaf_start = leaf_seg.PointAtStart
         ext_dir = rg.Vector3d(tip_dir)
@@ -354,9 +363,18 @@ def generate_recursive_support_branches(
         ext_dir.Unitize()
         extended_tip = tip_pt + ext_dir * leaf_extension
         if leaf_start.DistanceTo(extended_tip) > 1e-6:
-            accepted.append(rg.Line(leaf_start, extended_tip).ToNurbsCurve())
+            leaf_segments.append(rg.Line(leaf_start, extended_tip).ToNurbsCurve())
 
-    return dedupe_line_curves(accepted)
+    if trim_mesh is None:
+        return dedupe_line_curves(list(non_leaf_segments) + list(leaf_segments))
+
+    kept_non_leaf = trim_branches_to_mesh(
+        non_leaf_segments, trim_mesh, tol=trim_tol, cull_non_intersecting=False
+    )
+    kept_leaf = trim_branches_to_mesh(
+        leaf_segments, trim_mesh, tol=trim_tol, cull_non_intersecting=True
+    )
+    return dedupe_line_curves(list(kept_non_leaf) + list(kept_leaf))
 
 # ---------------------------------------------------------------------------
 # INPUT NORMALIZATION
@@ -506,6 +524,14 @@ else:
 # ---------------------------------------------------------------------------
 if root_points and root_points_ground and rec_depth > 0:
     root_count = min(len(root_points), max_branch_roots)
+    trim_tol = 1e-3
+    if mesh is not None:
+        try:
+            doc = Rhino.RhinoDoc.ActiveDoc
+            if doc is not None:
+                trim_tol = max(trim_tol, float(doc.ModelAbsoluteTolerance))
+        except:
+            pass
     support_branches = generate_recursive_support_branches(
         root_points_ground[:root_count],
         root_points[:root_count],
@@ -513,17 +539,10 @@ if root_points and root_points_ground and rec_depth > 0:
         n_branches,
         br_length,
         len_reduct,
-        branch_start_height
+        branch_start_height,
+        trim_mesh=mesh,
+        trim_tol=trim_tol
     )
-    if mesh is not None:
-        trim_tol = 1e-3
-        try:
-            doc = Rhino.RhinoDoc.ActiveDoc
-            if doc is not None:
-                trim_tol = max(trim_tol, float(doc.ModelAbsoluteTolerance))
-        except:
-            pass
-        support_branches = trim_branches_to_mesh(support_branches, mesh, trim_tol)
 else:
     support_branches = []
 
