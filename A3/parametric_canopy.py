@@ -143,10 +143,13 @@ freq_u = as_float(freq_u, 1.0)
 freq_v = as_float(freq_v, 1.0)
 heightmap_type = as_int(heightmap_type, 0, min_value=0)
 seed = as_int(seed, 1)
+tessellation_type = as_int(globals().get("tessellation_type", 0), 0, min_value=0)
+if tessellation_type not in (0, 1):
+    tessellation_type = 0
 
 debug.append(
-    "Inputs sanitized: U={}, V={}, amp={}, freq_u={}, freq_v={}, heightmap_type={}, seed={}".format(
-        U, V, amp, freq_u, freq_v, heightmap_type, seed
+    "Inputs sanitized: U={}, V={}, amp={}, freq_u={}, freq_v={}, heightmap_type={}, seed={}, tessellation_type={}".format(
+        U, V, amp, freq_u, freq_v, heightmap_type, seed, tessellation_type
     )
 )
 
@@ -235,10 +238,8 @@ if canopy_srf is not None:
 # ---------------------------------------------------------------------------
 # TESSELLATION
 # ---------------------------------------------------------------------------
-panels_quads = []
-panels_tris = []
-mesh_quads = rg.Mesh()
-mesh_tris = rg.Mesh()
+panels = []
+mesh = rg.Mesh()
 
 if srf_obj is not None and bad_count == 0:
     # Vertex index convention: i*(V+1) + j.
@@ -248,8 +249,7 @@ if srf_obj is not None and bad_count == 0:
     # Add mesh vertices.
     for i in range(rows):
         for j in range(cols):
-            mesh_quads.Vertices.Add(pts_grid[i][j])
-            mesh_tris.Vertices.Add(pts_grid[i][j])
+            mesh.Vertices.Add(pts_grid[i][j])
 
     # Build panel curves and corresponding mesh faces cell by cell.
     for i in range(rows - 1):
@@ -259,40 +259,30 @@ if srf_obj is not None and bad_count == 0:
             C = pts_grid[i + 1][j + 1]
             D = pts_grid[i][j + 1]
 
-            # Quad panel.
-            quad_pl = rg.Polyline([A, B, C, D, A])
-            panels_quads.append(quad_pl.ToNurbsCurve())
-
-            # Two triangle panels from the same cell.
-            tri1 = rg.Polyline([A, B, C, A])
-            tri2 = rg.Polyline([A, C, D, A])
-            panels_tris.append(tri1.ToNurbsCurve())
-            panels_tris.append(tri2.ToNurbsCurve())
-
             # Mesh indices for this cell.
             a = i * cols + j
             b = a + cols
             c = b + 1
             d = a + 1
 
-            # Quad face.
-            mesh_quads.Faces.AddFace(a, b, c, d)
+            if tessellation_type == 0:
+                quad_pl = rg.Polyline([A, B, C, D, A])
+                panels.append(quad_pl.ToNurbsCurve())
+                mesh.Faces.AddFace(a, b, c, d)
+            else:
+                tri1 = rg.Polyline([A, B, C, A])
+                tri2 = rg.Polyline([A, C, D, A])
+                panels.append(tri1.ToNurbsCurve())
+                panels.append(tri2.ToNurbsCurve())
+                mesh.Faces.AddFace(a, b, c)
+                mesh.Faces.AddFace(a, c, d)
 
-            # Two triangle faces.
-            mesh_tris.Faces.AddFace(a, b, c)
-            mesh_tris.Faces.AddFace(a, c, d)
-
-    mesh_quads.Normals.ComputeNormals()
-    mesh_quads.Compact()
-
-    mesh_tris.Normals.ComputeNormals()
-    mesh_tris.Compact()
+    mesh.Normals.ComputeNormals()
+    mesh.Compact()
 else:
     # Skip tessellation when point sampling is invalid.
-    panels_quads = []
-    panels_tris = []
-    mesh_quads = None
-    mesh_tris = None
+    panels = []
+    mesh = None
 
 # ---------------------------------------------------------------------------
 # FINAL OUTPUTS
@@ -300,7 +290,5 @@ else:
 out_points_flat = canopy_pts_flat
 out_points_tree = canopy_pts_tree
 out_heightmap = H_out
-out_panels_quad = panels_quads
-out_panels_tri = panels_tris
-out_mesh_quad = mesh_quads
-out_mesh_tri = mesh_tris
+out_panels = panels
+out_mesh = mesh
