@@ -16,6 +16,8 @@ H_out = []
 root_points = []
 root_points_ground = []
 root_trunks = []
+support_branches = []
+supports = []
 
 # Surface build candidates and runtime messages for debugging.
 canopy_srf_A = None
@@ -168,6 +170,62 @@ def heightmap_local_minima_indices(H):
     minima.sort(key=lambda x: x[2])
     return minima
 
+def generate_recursive_support_branches(
+    root_ground_pts,
+    root_top_pts,
+    depth,
+    branches_per_node,
+    base_length,
+    length_reduction
+):
+    curves = []
+    if depth <= 0:
+        return curves
+
+    root_count = min(len(root_ground_pts), len(root_top_pts))
+
+    for idx in range(root_count):
+        start_pt = root_ground_pts[idx]
+        target_pt = root_top_pts[idx]
+
+        base_dir = rg.Vector3d(target_pt - start_pt)
+        if base_dir.IsZero:
+            base_dir = rg.Vector3d(0, 0, 1)
+        else:
+            base_dir.Unitize()
+
+        target_dist = start_pt.DistanceTo(target_pt)
+        first_len = float(base_length) if base_length > 0.0 else (target_dist / float(max(1, depth)))
+        if first_len <= 1e-6:
+            first_len = 1.0
+
+        def grow(point, direction, level, length):
+            if level <= 0 or length <= 1e-6:
+                return
+
+            for branch_idx in range(branches_per_node):
+                if branches_per_node > 1:
+                    theta = (2.0 * np.pi * float(branch_idx)) / float(branches_per_node)
+                    offset = rg.Vector3d(np.cos(theta), np.sin(theta), 0.35)
+                else:
+                    offset = rg.Vector3d(0, 0, 0)
+
+                new_dir = rg.Vector3d(direction)
+                new_dir += offset * 0.35
+                if new_dir.IsZero:
+                    new_dir = rg.Vector3d(direction)
+                if new_dir.IsZero:
+                    new_dir = rg.Vector3d(0, 0, 1)
+                new_dir.Unitize()
+
+                end_pt = point + new_dir * float(length)
+                curves.append(rg.Line(point, end_pt).ToNurbsCurve())
+                grow(end_pt, new_dir, level - 1, length * float(length_reduction))
+
+        grow(start_pt, base_dir, depth, first_len)
+
+    return curves
+
 # ---------------------------------------------------------------------------
 # INPUT NORMALIZATION
 # ---------------------------------------------------------------------------
@@ -181,10 +239,24 @@ seed = as_int(seed, 1)
 tessellation_type = as_int(globals().get("tessellation_type", 0), 0, min_value=0)
 if tessellation_type not in (0, 1):
     tessellation_type = 0
+rec_depth = as_int(globals().get("rec_depth", 3), 3, min_value=0)
+n_branches = as_int(globals().get("n_branches", 2), 2, min_value=1)
+br_length = as_float(globals().get("br_length", 0.0), 0.0, min_value=0.0)
+len_reduct = as_float(globals().get("len_reduct", 0.7), 0.7)
+if len_reduct <= 0.0:
+    len_reduct = 0.7
+if len_reduct >= 1.0:
+    len_reduct = 0.95
+max_branch_roots = as_int(globals().get("max_branch_roots", 8), 8, min_value=1)
 
 debug.append(
     "Inputs sanitized: U={}, V={}, amp={}, freq_u={}, freq_v={}, heightmap_type={}, seed={}, tessellation_type={}".format(
         U, V, amp, freq_u, freq_v, heightmap_type, seed, tessellation_type
+    )
+)
+debug.append(
+    "Support inputs: rec_depth={}, n_branches={}, br_length={}, len_reduct={}, max_branch_roots={}".format(
+        rec_depth, n_branches, br_length, len_reduct, max_branch_roots
     )
 )
 
@@ -285,6 +357,27 @@ if pts_grid and bad_count == 0:
     debug.append("Root points from local minima: {}".format(len(root_points)))
 
 # ---------------------------------------------------------------------------
+# RECURSIVE SUPPORT BRANCHES
+# ---------------------------------------------------------------------------
+if root_points and root_points_ground and rec_depth > 0:
+    root_count = min(len(root_points), max_branch_roots)
+    support_branches = generate_recursive_support_branches(
+        root_points_ground[:root_count],
+        root_points[:root_count],
+        rec_depth,
+        n_branches,
+        br_length,
+        len_reduct
+    )
+    debug.append("Branch roots used: {}".format(root_count))
+    debug.append("Support branches generated: {}".format(len(support_branches)))
+else:
+    support_branches = []
+    debug.append("Support branching skipped.")
+
+supports = list(root_trunks) + list(support_branches)
+
+# ---------------------------------------------------------------------------
 # TESSELLATION
 # ---------------------------------------------------------------------------
 panels = []
@@ -342,5 +435,7 @@ out_heightmap = H_out
 out_root_points = root_points
 out_root_points_ground = root_points_ground
 out_root_trunks = root_trunks
+out_support_branches = support_branches
+out_supports = supports
 out_panels = panels
 out_mesh = mesh
