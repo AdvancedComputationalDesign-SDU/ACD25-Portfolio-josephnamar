@@ -18,6 +18,8 @@ root_points_ground = []
 root_trunks = []
 support_branches = []
 supports = DataTree[object]()
+support_sweeps = None
+support_smooth = None
 
 def coerce_face_or_surface(geo):
     g = getattr(geo, "Geometry", geo)
@@ -412,6 +414,216 @@ def level_map_to_tree(level_map, first_level_curves=None, reverse_recursive=True
         branch_idx += 1
     return tree
 
+def sweep_supports_to_tree(
+    level_map,
+    first_level_curves=None,
+    reverse_recursive=True,
+    first_diameter=1.0,
+    last_diameter=0.2,
+    abs_tol=1e-3,
+    ang_tol_rad=0.1
+):
+    tree = DataTree[object]()
+    groups = []
+
+    if first_level_curves:
+        group0 = [c for c in first_level_curves if c is not None]
+        if group0:
+            groups.append(group0)
+
+    for level in sorted(level_map.keys(), reverse=bool(reverse_recursive)):
+        grp = [c for c in level_map.get(level, []) if c is not None]
+        if grp:
+            groups.append(grp)
+
+    n = len(groups)
+    if n == 0:
+        return tree
+
+    d0 = max(0.0, float(first_diameter))
+    d1 = max(0.0, float(last_diameter))
+
+    for idx in range(n):
+        if n == 1:
+            dia = d0
+        else:
+            t = float(idx) / float(n - 1)
+            dia = d0 + (d1 - d0) * t
+        radius = 0.5 * max(0.0, dia)
+        if radius <= 1e-9:
+            continue
+
+        path = GH_Path(idx)
+        for rail in groups[idx]:
+            try:
+                breps = rg.Brep.CreatePipe(
+                    rail,
+                    radius,
+                    False,
+                    rg.PipeCapMode.Flat,
+                    True,
+                    float(abs_tol),
+                    float(ang_tol_rad)
+                )
+            except:
+                breps = None
+
+            if not breps:
+                continue
+            for b in breps:
+                if b is not None and b.IsValid:
+                    tree.Add(b, path)
+
+    return tree
+
+def collect_tree_geometry(tree):
+    out = []
+    if tree is None:
+        return out
+
+    try:
+        for br in tree.Branches:
+            if br is None:
+                continue
+            for g in br:
+                if g is not None:
+                    out.append(g)
+        return out
+    except:
+        pass
+
+    try:
+        for i in range(int(tree.BranchCount)):
+            br = tree.Branch(i)
+            if br is None:
+                continue
+            for g in br:
+                if g is not None:
+                    out.append(g)
+    except:
+        pass
+
+    return out
+
+def subd_from_mesh_best_effort(mesh_obj):
+    if mesh_obj is None or (not mesh_obj.IsValid) or mesh_obj.Vertices.Count == 0:
+        return None
+
+    subd_obj = None
+    try:
+        fn = getattr(rg.SubD, "CreateFromMesh", None)
+    except:
+        fn = None
+
+    if fn is None:
+        return None
+
+    for args in ((mesh_obj,), (mesh_obj, True), (mesh_obj, False)):
+        try:
+            subd_obj = fn(*args)
+        except:
+            subd_obj = None
+        if subd_obj is not None:
+            break
+    return subd_obj
+
+def smooth_support_sweeps_subd_like(
+    sweep_tree,
+    abs_tol=1e-3,
+    ang_tol_rad=np.pi / 180.0,
+    smooth_control=0.5
+):
+    geos = collect_tree_geometry(sweep_tree)
+    breps = [g for g in geos if isinstance(g, rg.Brep)]
+    if not breps:
+        return None
+
+    union = None
+    try:
+        union = rg.Brep.CreateBooleanUnion(breps, float(abs_tol))
+    except:
+        union = None
+
+    work_breps = list(union) if union and len(union) > 0 else list(breps)
+    if not work_breps:
+        return None
+
+    merged = rg.Mesh()
+    mp = rg.MeshingParameters.Smooth
+    try:
+        mp.MinimumEdgeLength = max(0.0, float(abs_tol))
+    except:
+        pass
+
+    for b in work_breps:
+        parts = None
+        try:
+            parts = rg.Mesh.CreateFromBrep(b, mp)
+        except:
+            try:
+                parts = rg.Mesh.CreateFromBrep(b)
+            except:
+                parts = None
+        if not parts:
+            continue
+        for m in parts:
+            if m is not None and m.IsValid and m.Vertices.Count > 0:
+                merged.Append(m)
+
+    if merged.Vertices.Count == 0:
+        if union and len(union) > 0:
+            return union[0]
+        return None
+
+    try:
+        merged.Weld(float(ang_tol_rad))
+    except:
+        pass
+    try:
+        merged.UnifyNormals()
+    except:
+        pass
+    try:
+        merged.Normals.ComputeNormals()
+    except:
+        pass
+
+    ctrl = as_float(smooth_control, 0.5)
+    if ctrl < 0.0:
+        ctrl = 0.0
+    if ctrl > 1.0:
+        ctrl = 1.0
+
+    # Single user control mapped to iterations and Laplacian factor.
+    steps = int(round(2.0 + 12.0 * ctrl))
+    fac = 0.15 + 0.55 * ctrl
+
+    for _ in range(steps):
+        ok = False
+        try:
+            ok = bool(merged.Smooth(float(fac), True, True, True, False))
+        except:
+            try:
+                ok = bool(merged.Smooth(float(fac)))
+            except:
+                ok = False
+        if not ok:
+            break
+
+    try:
+        merged.Normals.ComputeNormals()
+    except:
+        pass
+    try:
+        merged.Compact()
+    except:
+        pass
+
+    subd_obj = subd_from_mesh_best_effort(merged)
+    if subd_obj is not None:
+        return subd_obj
+    return merged
+
 def generate_recursive_support_branches(
     root_ground_pts,
     root_top_pts,
@@ -688,6 +900,12 @@ if len_reduct >= 1.0:
     len_reduct = 0.95
 branch_start_height = as_float(globals().get("branch_start_height", 0.0), 0.0, min_value=0.0)
 extension_length = as_float(globals().get("extension_length", 10.0), 10.0, min_value=0.0)
+main_stem_diameter = as_float(globals().get("main_stem_diameter", 1.0), 1.0, min_value=0.0)
+smooth_control = as_float(globals().get("smooth_control", 0.5), 0.5)
+if smooth_control < 0.0:
+    smooth_control = 0.0
+if smooth_control > 1.0:
+    smooth_control = 1.0
 max_branch_roots = as_int(globals().get("max_branch_roots", 8), 8, min_value=1)
 
 srf_obj = coerce_face_or_surface(srf)
@@ -862,6 +1080,22 @@ supports = level_map_to_tree(
     first_level_curves=support_root_stems,
     reverse_recursive=True
 )
+support_sweeps_tree = sweep_supports_to_tree(
+    support_levels,
+    first_level_curves=support_root_stems,
+    reverse_recursive=True,
+    first_diameter=main_stem_diameter,
+    last_diameter=0.2,
+    abs_tol=support_cull_tol,
+    ang_tol_rad=np.pi / 180.0
+)
+support_sweeps = smooth_support_sweeps_subd_like(
+    support_sweeps_tree,
+    abs_tol=support_cull_tol,
+    ang_tol_rad=np.pi / 180.0,
+    smooth_control=smooth_control
+)
+support_smooth = support_sweeps
 
 # ---------------------------------------------------------------------------
 # FINAL OUTPUTS
@@ -874,5 +1108,7 @@ out_root_points_ground = root_points_ground
 out_root_trunks = root_trunks
 out_support_branches = support_branches
 out_supports = supports
+out_support_sweeps = support_sweeps
+out_support_smooth = support_smooth
 out_panels = panels
 out_mesh = mesh
