@@ -19,11 +19,6 @@ root_trunks = []
 support_branches = []
 supports = []
 
-# Surface build candidates and runtime messages for debugging.
-canopy_srf_A = None
-canopy_srf_B = None
-debug = []
-
 def coerce_face_or_surface(geo):
     g = getattr(geo, "Geometry", geo)
     try:
@@ -176,17 +171,50 @@ def generate_recursive_support_branches(
     depth,
     branches_per_node,
     base_length,
-    length_reduction
+    length_reduction,
+    branch_start_height
 ):
     curves = []
     if depth <= 0:
         return curves
 
+    def local_frame_from_direction(direction):
+        d = rg.Vector3d(direction)
+        if d.IsZero:
+            d = rg.Vector3d(0, 0, 1)
+        d.Unitize()
+
+        ref = rg.Vector3d(0, 0, 1)
+        if abs(rg.Vector3d.Multiply(d, ref)) > 0.95:
+            ref = rg.Vector3d(1, 0, 0)
+
+        x_axis = rg.Vector3d.CrossProduct(d, ref)
+        if x_axis.IsZero:
+            x_axis = rg.Vector3d(1, 0, 0)
+        x_axis.Unitize()
+
+        y_axis = rg.Vector3d.CrossProduct(d, x_axis)
+        if y_axis.IsZero:
+            y_axis = rg.Vector3d(0, 1, 0)
+        y_axis.Unitize()
+
+        return x_axis, y_axis
+
     root_count = min(len(root_ground_pts), len(root_top_pts))
 
     for idx in range(root_count):
-        start_pt = root_ground_pts[idx]
+        root_ground = root_ground_pts[idx]
         target_pt = root_top_pts[idx]
+
+        trunk_vec = rg.Vector3d(target_pt - root_ground)
+        trunk_len = trunk_vec.Length
+        if trunk_len > 1e-6:
+            trunk_dir = rg.Vector3d(trunk_vec)
+            trunk_dir.Unitize()
+            start_dist = min(max(float(branch_start_height), 0.0), trunk_len)
+            start_pt = root_ground + trunk_dir * start_dist
+        else:
+            start_pt = root_ground
 
         base_dir = rg.Vector3d(target_pt - start_pt)
         if base_dir.IsZero:
@@ -194,24 +222,26 @@ def generate_recursive_support_branches(
         else:
             base_dir.Unitize()
 
-        target_dist = start_pt.DistanceTo(target_pt)
-        first_len = float(base_length) if base_length > 0.0 else (target_dist / float(max(1, depth)))
+        trunk_dist = root_ground.DistanceTo(target_pt)
+        first_len = float(base_length) if base_length > 0.0 else (trunk_dist / float(max(1, depth)))
         if first_len <= 1e-6:
             first_len = 1.0
+
+        root_phase = (0.173 * float(start_pt.X) + 0.117 * float(start_pt.Y) + 0.619 * float(idx)) % (2.0 * np.pi)
 
         def grow(point, direction, level, length):
             if level <= 0 or length <= 1e-6:
                 return
 
-            for branch_idx in range(branches_per_node):
-                if branches_per_node > 1:
-                    theta = (2.0 * np.pi * float(branch_idx)) / float(branches_per_node)
-                    offset = rg.Vector3d(np.cos(theta), np.sin(theta), 0.35)
-                else:
-                    offset = rg.Vector3d(0, 0, 0)
+            x_axis, y_axis = local_frame_from_direction(direction)
 
-                new_dir = rg.Vector3d(direction)
-                new_dir += offset * 0.35
+            for branch_idx in range(branches_per_node):
+                theta = root_phase + (2.0 * np.pi * float(branch_idx)) / float(max(1, branches_per_node))
+                theta += 0.45 * float(level)
+
+                lateral = x_axis * float(np.cos(theta)) + y_axis * float(np.sin(theta))
+                new_dir = rg.Vector3d(direction) * 0.85
+                new_dir += lateral * 0.50
                 if new_dir.IsZero:
                     new_dir = rg.Vector3d(direction)
                 if new_dir.IsZero:
@@ -247,26 +277,14 @@ if len_reduct <= 0.0:
     len_reduct = 0.7
 if len_reduct >= 1.0:
     len_reduct = 0.95
+branch_start_height = as_float(globals().get("branch_start_height", 0.0), 0.0, min_value=0.0)
 max_branch_roots = as_int(globals().get("max_branch_roots", 8), 8, min_value=1)
-
-debug.append(
-    "Inputs sanitized: U={}, V={}, amp={}, freq_u={}, freq_v={}, heightmap_type={}, seed={}, tessellation_type={}".format(
-        U, V, amp, freq_u, freq_v, heightmap_type, seed, tessellation_type
-    )
-)
-debug.append(
-    "Support inputs: rec_depth={}, n_branches={}, br_length={}, len_reduct={}, max_branch_roots={}".format(
-        rec_depth, n_branches, br_length, len_reduct, max_branch_roots
-    )
-)
 
 srf_obj = coerce_face_or_surface(srf)
 pts_grid = []
 bad_count = 0
 
-if srf_obj is None:
-    debug.append("srf is None or could not be coerced.")
-else:
+if srf_obj is not None:
     du = srf_obj.Domain(0); dv = srf_obj.Domain(1)
     du0, du1 = du.T0, du.T1
     dv0, dv1 = dv.T0, dv.T1
@@ -290,57 +308,35 @@ else:
             if not is_finite_point(p):
                 bad_count += 1
 
-    debug.append("Grid size expected: {} x {}".format(U+1, V+1))
-    debug.append("Invalid/NaN points found: {}".format(bad_count))
-
     # Keep surface degree within valid limits for the current grid size.
     deg_u = 3 if (U + 1) >= 4 else max(1, (U + 1) - 1)
     deg_v = 3 if (V + 1) >= 4 else max(1, (V + 1) - 1)
-
-    debug.append("Degrees used: ({}, {})".format(deg_u, deg_v))
 
     srf_A, Pts_A, srf_B, Pts_B = build_surface_candidates(
         pts_grid, U + 1, V + 1, deg_u, deg_v
     )
 
-    canopy_srf_A = srf_A
-    canopy_srf_B = srf_B
-
-    debug.append("CreateThroughPoints A valid: {}".format(bool(srf_A and srf_A.IsValid)))
-    debug.append("CreateThroughPoints B valid: {}".format(bool(srf_B and srf_B.IsValid)))
-
     # Prefer direct NURBS reconstruction; fall back to loft if needed.
     if srf_A and srf_A.IsValid:
         canopy_srf = srf_A
         canopy_pts_flat = Pts_A
-        debug.append("Chosen: A (i-major flatten).")
     elif srf_B and srf_B.IsValid:
         canopy_srf = srf_B
         canopy_pts_flat = Pts_B
-        debug.append("Chosen: B (j-major flatten).")
     else:
         loft_A = loft_surface_from_grid(pts_grid, U + 1, V + 1, along_u=True)
         loft_B = loft_surface_from_grid(pts_grid, U + 1, V + 1, along_u=False)
-        debug.append("Loft fallback A valid: {}".format(bool(loft_A and loft_A.IsValid)))
-        debug.append("Loft fallback B valid: {}".format(bool(loft_B and loft_B.IsValid)))
 
         if loft_A and loft_A.IsValid:
             surf_from_loft_A = first_face_surface(loft_A)
             canopy_srf = surf_from_loft_A if surf_from_loft_A else loft_A
-            debug.append("Chosen: Loft fallback A (sections along U). Face surface extracted: {}".format(bool(surf_from_loft_A)))
         elif loft_B and loft_B.IsValid:
             surf_from_loft_B = first_face_surface(loft_B)
             canopy_srf = surf_from_loft_B if surf_from_loft_B else loft_B
-            debug.append("Chosen: Loft fallback B (sections along V). Face surface extracted: {}".format(bool(surf_from_loft_B)))
         else:
             canopy_srf = None
-            debug.append("All surface build attempts failed.")
 
         canopy_pts_flat = Pts_A
-        debug.append("Most likely cause: grid ordering mismatch or problematic source surface/domain.")
-
-if canopy_srf is not None:
-    debug.append("Final canopy_srf type: {}".format(type(canopy_srf).__name__))
 
 # ---------------------------------------------------------------------------
 # ROOT POINTS (FROM HEIGHTMAP MINIMA)
@@ -354,8 +350,6 @@ if pts_grid and bad_count == 0:
         root_points_ground.append(p_ground)
         root_trunks.append(rg.Line(p_ground, p_top).ToNurbsCurve())
 
-    debug.append("Root points from local minima: {}".format(len(root_points)))
-
 # ---------------------------------------------------------------------------
 # RECURSIVE SUPPORT BRANCHES
 # ---------------------------------------------------------------------------
@@ -367,13 +361,11 @@ if root_points and root_points_ground and rec_depth > 0:
         rec_depth,
         n_branches,
         br_length,
-        len_reduct
+        len_reduct,
+        branch_start_height
     )
-    debug.append("Branch roots used: {}".format(root_count))
-    debug.append("Support branches generated: {}".format(len(support_branches)))
 else:
     support_branches = []
-    debug.append("Support branching skipped.")
 
 supports = list(root_trunks) + list(support_branches)
 
