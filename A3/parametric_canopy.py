@@ -256,12 +256,41 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=Fals
 
     return dedupe_line_curves(trimmed)
 
-def level_map_to_tree(level_map):
+def build_root_stems_to_branch_start(root_ground_pts, root_top_pts, branch_start_height):
+    stems = []
+    root_count = min(len(root_ground_pts), len(root_top_pts))
+    for idx in range(root_count):
+        p_ground = root_ground_pts[idx]
+        p_top = root_top_pts[idx]
+        trunk_vec = rg.Vector3d(p_top - p_ground)
+        trunk_len = trunk_vec.Length
+        if trunk_len <= 1e-6:
+            continue
+
+        trunk_dir = rg.Vector3d(trunk_vec)
+        trunk_dir.Unitize()
+        start_dist = min(max(float(branch_start_height), 0.0), trunk_len)
+        p_start = p_ground + trunk_dir * start_dist
+        if p_ground.DistanceTo(p_start) > 1e-6:
+            stems.append(rg.Line(p_ground, p_start).ToNurbsCurve())
+    return stems
+
+def level_map_to_tree(level_map, first_level_curves=None, reverse_recursive=True):
     tree = DataTree[object]()
-    for level in sorted(level_map.keys()):
-        path = GH_Path(int(level))
+    branch_idx = 0
+
+    if first_level_curves:
+        path0 = GH_Path(branch_idx)
+        for crv in first_level_curves:
+            if crv is not None:
+                tree.Add(crv, path0)
+        branch_idx += 1
+
+    for level in sorted(level_map.keys(), reverse=bool(reverse_recursive)):
+        path = GH_Path(branch_idx)
         for crv in level_map.get(level, []):
             tree.Add(crv, path)
+        branch_idx += 1
     return tree
 
 def generate_recursive_support_branches(
@@ -617,8 +646,14 @@ else:
 # ---------------------------------------------------------------------------
 # RECURSIVE SUPPORT BRANCHES
 # ---------------------------------------------------------------------------
-if root_points and root_points_ground and rec_depth > 0:
-    root_count = min(len(root_points), max_branch_roots)
+support_root_count = min(len(root_points), len(root_points_ground), max_branch_roots)
+support_root_stems = build_root_stems_to_branch_start(
+    root_points_ground[:support_root_count],
+    root_points[:support_root_count],
+    branch_start_height
+) if support_root_count > 0 else []
+
+if support_root_count > 0 and rec_depth > 0:
     trim_tol = 1e-3
     if mesh is not None:
         try:
@@ -628,8 +663,8 @@ if root_points and root_points_ground and rec_depth > 0:
         except:
             pass
     support_branches, support_levels = generate_recursive_support_branches(
-        root_points_ground[:root_count],
-        root_points[:root_count],
+        root_points_ground[:support_root_count],
+        root_points[:support_root_count],
         rec_depth,
         n_branches,
         br_length,
@@ -643,7 +678,11 @@ else:
     support_branches = []
     support_levels = {}
 
-supports = level_map_to_tree(support_levels)
+supports = level_map_to_tree(
+    support_levels,
+    first_level_curves=support_root_stems,
+    reverse_recursive=True
+)
 
 # ---------------------------------------------------------------------------
 # FINAL OUTPUTS
