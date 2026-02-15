@@ -25,9 +25,12 @@ import math
 # - point_divV      : int, optional output-point V subdivisions (independent of divV)
 #   Aliases supported: seed_divU/seed_divV, out_divU/out_divV
 #
+# - terrain_complexity : float in [0,1]. Higher = more detail + more macro variation
+# - terrain_steepness  : float in [0,1]. Higher = sharper ridges + steeper transitions
+#
 # Outputs:
 # - out_surface : generated displaced surface (NurbsSurface or Brep fallback)
-# - out_points  : flattened displaced Point3d grid (uses point_divU/point_divV)
+# - out_points  : flattened displaced Point3d list (uniform grid by point_divU/point_divV)
 # - srf_id      : compatibility output (always None in this RhinoCommon workflow)
 # ---------------------------------------------------------------------------
 
@@ -64,6 +67,13 @@ def as_float(value, default, min_value=None):
         out = float(min_value)
     return out
 
+def clamp01(x):
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
 
 def eval_point_normal(srf_obj, u, v):
     pt = srf_obj.PointAt(u, v)
@@ -81,19 +91,143 @@ def deterministic_noise(un, vn, seed_val):
     frac = n - np.floor(n)
     return (frac * 2.0) - 1.0
 
+def value_noise_2d(un, vn, cells_u, cells_v, seed_val):
+    """
+    Smooth value noise sampled from a random lattice with bilinear interpolation.
+    Output range: [0, 1].
+    """
+    cu = max(1, int(cells_u))
+    cv = max(1, int(cells_v))
+    rng = np.random.RandomState(int(seed_val))
+    lattice = rng.rand(cu + 1, cv + 1)
 
-def evaluate_height_field(un, vn, amp, freq, phs, heightmap_type, seed_val):
+    x = np.minimum(un * float(cu), float(cu) - 1e-9)
+    y = np.minimum(vn * float(cv), float(cv) - 1e-9)
+
+    xi = np.floor(x).astype(np.int32)
+    yi = np.floor(y).astype(np.int32)
+    xf = x - xi
+    yf = y - yi
+
+    # Smoothstep interpolation for gentler slope transitions.
+    sx = xf * xf * (3.0 - 2.0 * xf)
+    sy = yf * yf * (3.0 - 2.0 * yf)
+
+    xi1 = xi + 1
+    yi1 = yi + 1
+
+    v00 = lattice[xi, yi]
+    v10 = lattice[xi1, yi]
+    v01 = lattice[xi, yi1]
+    v11 = lattice[xi1, yi1]
+
+    a = v00 + (v10 - v00) * sx
+    b = v01 + (v11 - v01) * sx
+    return a + (b - a) * sy
+
+def fbm_noise_2d(un, vn, base_cells, octaves, roughness, lacunarity, seed_val):
+    """
+    Fractal Brownian motion noise from value-noise octaves.
+    Output range: approximately [0, 1].
+    """
+    octv = max(1, int(octaves))
+    amp = 1.0
+    sum_amp = 0.0
+    out = np.zeros_like(un, dtype=float)
+    cells = max(1.0, float(base_cells))
+
+    for o in range(octv):
+        n = value_noise_2d(un, vn, int(round(cells)), int(round(cells)), int(seed_val) + (o * 1013))
+        out += amp * n
+        sum_amp += amp
+        amp *= float(roughness)
+        cells *= float(lacunarity)
+
+    if sum_amp > 1e-12:
+        out /= sum_amp
+    return out
+
+def random_terrain_field(un, vn, amp, freq, seed_val, opts):
+    """
+    Random terrain with mixed low/high slope zones:
+    - multi-octave smooth noise
+    - optional ridged mixing
+    - macro hill/valley blobs
+    """
+    octaves = int(opts.get("octaves", 5))
+    roughness = float(opts.get("roughness", 0.55))
+    lacunarity = float(opts.get("lacunarity", 2.0))
+    ridge_mix = clamp01(float(opts.get("ridge_mix", 0.35)))
+    peak_count = max(0, int(opts.get("peak_count", 6)))
+    peak_strength = max(0.0, float(opts.get("peak_strength", 0.6)))
+    contrast = max(0.1, float(opts.get("contrast", 1.5)))
+
+    base_cells = max(1.0, 2.0 * max(0.25, float(freq)))
+
+    fbm = fbm_noise_2d(un, vn, base_cells, octaves, roughness, lacunarity, seed_val)
+    base = (fbm * 2.0) - 1.0
+
+    # Ridged variant emphasizes steeper transitions.
+    ridged01 = 1.0 - np.abs(base)
+    ridged = (ridged01 * 2.0) - 1.0
+    terrain = ((1.0 - ridge_mix) * base) + (ridge_mix * ridged)
+
+    # Add macro hills/valleys to create broad low/high slope regions.
+    if peak_count > 0 and peak_strength > 1e-12:
+        rng = np.random.RandomState(int(seed_val) + 7919)
+        macro = np.zeros_like(un, dtype=float)
+        for _ in range(peak_count):
+            cx = rng.rand()
+            cy = rng.rand()
+            sigma = rng.uniform(0.08, 0.28)
+            h = rng.uniform(-1.0, 1.0)
+            d2 = ((un - cx) ** 2 + (vn - cy) ** 2) / max(1e-9, sigma * sigma)
+            macro += h * np.exp(-0.5 * d2)
+        m = np.max(np.abs(macro))
+        if m > 1e-12:
+            macro /= m
+        terrain = ((1.0 - peak_strength) * terrain) + (peak_strength * macro)
+
+    # Contrast boost for clearer steep/flat distinctions.
+    terrain = np.tanh(contrast * terrain)
+    return float(amp) * terrain
+
+
+def terrain_options_from_controls(complexity, steepness):
+    """
+    Map two user-friendly controls to full random-terrain parameters.
+    """
+    c = clamp01(float(complexity))
+    s = clamp01(float(steepness))
+
+    octaves = int(round(3.0 + 5.0 * c))          # 3..8
+    roughness = max(0.25, 0.72 - 0.27 * c)       # ~0.72..0.45
+    lacunarity = 1.5 + 1.0 * c                   # 1.5..2.5
+    ridge_mix = clamp01(0.10 + 0.80 * s)         # 0.1..0.9
+    peak_count = int(round(2.0 + 8.0 * c))       # 2..10
+    peak_strength = clamp01(0.20 + 0.65 * c)     # 0.2..0.85
+    contrast = 0.9 + 2.2 * s                     # 0.9..3.1
+
+    return {
+        "octaves": octaves,
+        "roughness": roughness,
+        "lacunarity": lacunarity,
+        "ridge_mix": ridge_mix,
+        "peak_count": peak_count,
+        "peak_strength": peak_strength,
+        "contrast": contrast
+    }
+
+
+def evaluate_height_field(un, vn, amp, freq, phs, heightmap_type, seed_val, terrain_opts=None):
     if int(heightmap_type) == 0:
         wave = np.sin((2.0 * math.pi * freq * (un + vn)) + phs)
         dist = np.sqrt((un - 0.5) ** 2 + (vn - 0.5) ** 2)
         bump = np.exp(-5.0 * dist ** 2)
         return amp * (0.6 * wave + 0.4 * bump)
 
-    r = np.sqrt((un - 0.5) ** 2 + (vn - 0.5) ** 2)
-    mx = np.max(r) if np.max(r) != 0.0 else 1.0
-    falloff = 1.0 - (r / mx)
-    noise = deterministic_noise(un, vn, seed_val)
-    return amp * falloff * noise
+    # Richer random terrain mode (type 1).
+    return random_terrain_field(un, vn, amp, freq, seed_val, terrain_opts or {})
 
 
 def sample_displaced_grid(
@@ -107,7 +241,8 @@ def sample_displaced_grid(
     phs,
     heightmap_type,
     lift_val,
-    seed_val
+    seed_val,
+    terrain_opts=None
 ):
     # Parameter-space sampling.
     u_vals = np.linspace(dom_u.T0, dom_u.T1, u_div + 1)
@@ -119,7 +254,7 @@ def sample_displaced_grid(
     vn = np.linspace(0.0, 1.0, v_div + 1)
     Un, Vn = np.meshgrid(un, vn, indexing="ij")
 
-    H = evaluate_height_field(Un, Vn, amp, freq, phs, heightmap_type, seed_val)
+    H = evaluate_height_field(Un, Vn, amp, freq, phs, heightmap_type, seed_val, terrain_opts)
 
     pts_grid = [[None] * (v_div + 1) for _ in range(u_div + 1)]
     pts_flat = []
@@ -192,6 +327,8 @@ IN_phase = globals().get("phase", 0.0)
 IN_amplitude = globals().get("amplitude", 1.0)
 IN_lift = globals().get("lift", 0.0)
 IN_heightmap_type = globals().get("heightmap_type", 0)
+IN_terrain_complexity = globals().get("terrain_complexity", 0.6)
+IN_terrain_steepness = globals().get("terrain_steepness", 0.6)
 
 # Independent output-point density controls.
 IN_point_divU = globals().get(
@@ -213,6 +350,8 @@ phs = as_float(IN_phase, 0.0)
 amp = as_float(IN_amplitude, 1.0)
 lift_val = as_float(IN_lift, 0.0)
 heightmap_type = as_int(IN_heightmap_type, 0, min_value=0)
+terrain_complexity = clamp01(as_float(IN_terrain_complexity, 0.6))
+terrain_steepness = clamp01(as_float(IN_terrain_steepness, 0.6))
 
 seed_i = 0
 if IN_seed is not None:
@@ -222,6 +361,8 @@ if IN_seed is not None:
         seed_i = 0
 random.seed(seed_i)
 np.random.seed(seed_i)
+
+terrain_opts = terrain_options_from_controls(terrain_complexity, terrain_steepness)
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +394,8 @@ if srf_obj is not None and isinstance(srf_obj, (rg.Surface, rg.BrepFace)):
         phs,
         heightmap_type,
         lift_val,
-        seed_i
+        seed_i,
+        terrain_opts
     )
 
     deg_u = 3 if (U + 1) >= 4 else max(1, U)
@@ -291,6 +433,7 @@ if srf_obj is not None and isinstance(srf_obj, (rg.Surface, rg.BrepFace)):
             phs,
             heightmap_type,
             lift_val,
-            seed_i
+            seed_i,
+            terrain_opts
         )
         out_points = pts_flat_dense

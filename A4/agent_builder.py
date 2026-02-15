@@ -12,6 +12,10 @@ import Rhino.Geometry as rg
 # - seed         : int (optional). Random/NumPy seed for repeatable initialization noise.
 # - max_speed    : float. Base step size for each agent.
 # - seed_points  : list[Point3d]. Initial points projected to the surface as agent starts.
+# Optional builder-side seed shaping (set via additional GH inputs/globals):
+# - init_agent_count : int. Target count for initial agents (default = all seed points).
+# - seed_slope_bias  : float in [0..1]. 0 = uniform seed selection, 1 = strongly slope-biased.
+# - seed_slope_power : float >= 0.1. Higher values emphasize steeper zones.
 #
 # Outputs:
 # - agents       : list[Agent] for downstream simulation.
@@ -79,6 +83,22 @@ def as_int(value, default, min_value=None):
         out = int(min_value)
     return out
 
+def as_float(value, default, min_value=None):
+    try:
+        out = float(value)
+    except:
+        out = float(default)
+    if min_value is not None and out < min_value:
+        out = float(min_value)
+    return out
+
+def clamp01(x):
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
 def clamp_param(t, dom):
     if t < dom.T0: return dom.T0
     if t > dom.T1: return dom.T1
@@ -87,6 +107,70 @@ def clamp_param(t, dom):
 def project_to_tangent(v, n):
     # v_tan = v - n*(v·n)
     return v - n * rg.Vector3d.Multiply(v, n)
+
+
+def slope_magnitude_from_normal(n):
+    if n is None or n.IsZero:
+        return 0.0
+    nn = rg.Vector3d(n)
+    nn.Unitize()
+    z = rg.Vector3d(0, 0, 1)
+    dz = abs(rg.Vector3d.Multiply(nn, z))
+    return 1.0 - max(0.0, min(1.0, dz))
+
+
+def select_seed_points(surface, pts3, target_count, slope_bias, slope_power, seed_val):
+    """
+    Select initial seed points, optionally biased toward high-slope regions.
+    Returns selected points and a debug tuple: (candidate_count, selected_count).
+    """
+    if not pts3:
+        return [], (0, 0)
+
+    n = len(pts3)
+    target = as_int(target_count, n, min_value=1)
+    b = clamp01(as_float(slope_bias, 0.0))
+    pwr = as_float(slope_power, 2.0, min_value=0.1)
+
+    # Fast path: no bias and no resampling requested.
+    if b <= 1e-12 and target == n:
+        return list(pts3), (n, n)
+
+    candidates = []
+    weights = []
+
+    for p3 in pts3:
+        ok, u, v = surface.ClosestPoint(p3)
+        if not ok:
+            continue
+        nrm = surface.NormalAt(u, v)
+        slope_mag = slope_magnitude_from_normal(nrm)
+        w = (1.0 - b) + (b * (slope_mag ** pwr))
+        if w <= 1e-12:
+            w = 1e-12
+        candidates.append(p3)
+        weights.append(w)
+
+    m = len(candidates)
+    if m == 0:
+        return [], (0, 0)
+
+    w = np.array(weights, dtype=float)
+    w_sum = float(np.sum(w))
+    if w_sum <= 1e-12:
+        w[:] = 1.0 / float(m)
+    else:
+        w /= w_sum
+
+    replace = bool(target > m)
+    rng = np.random.RandomState(int(seed_val) if seed_val is not None else 0)
+    try:
+        idx = rng.choice(m, size=target, replace=replace, p=w)
+    except:
+        idx = rng.choice(m, size=target, replace=replace)
+
+    selected = [candidates[int(i)] for i in idx]
+    return selected, (m, len(selected))
 
 # ---------------------------------------------------------------------------
 # Agent definition
@@ -345,7 +429,7 @@ class Agent:
 # ---------------------------------------------------------------------------
 # Agent builder from seed points
 # ---------------------------------------------------------------------------
-def build_agents_from_seed(surface, seed_points, max_speed):
+def build_agents_from_seed(surface, seed_points, max_speed, seed_val=None):
     pts_raw = iter_any(seed_points)
     pts3 = []
     for pt in pts_raw:
@@ -365,11 +449,25 @@ def build_agents_from_seed(surface, seed_points, max_speed):
                 v = dv.T0 + (float(j) / float(div_v)) * (dv.T1 - dv.T0)
                 pts3.append(surface.PointAt(u, v))
 
+    # Optional slope-biased seeding (belongs in builder, not surface generator).
+    init_agent_count = as_int(globals().get("init_agent_count", len(pts3)), len(pts3), min_value=1)
+    seed_slope_bias = as_float(globals().get("seed_slope_bias", 0.0), 0.0)
+    seed_slope_power = as_float(globals().get("seed_slope_power", 2.0), 2.0, min_value=0.1)
+
+    pts3_selected, sel_dbg = select_seed_points(
+        surface,
+        pts3,
+        init_agent_count,
+        seed_slope_bias,
+        seed_slope_power,
+        seed_val
+    )
+
     agents = []
     uvs = []
     poss = []
 
-    for p3 in pts3:
+    for p3 in pts3_selected:
         ok, u, v = surface.ClosestPoint(p3)
         if not ok:
             continue
@@ -379,11 +477,16 @@ def build_agents_from_seed(surface, seed_points, max_speed):
         uvs.append(key2(u, v))
         poss.append(key3(a.position))
 
-    dbg = "seed_raw:{0} seed_coerced:{1} agents:{2} unique_uv:{3} unique_pos:{4} unique_seed:{5}".format(
-        len(pts_raw), len(pts3), len(agents),
-        len(set(uvs)), len(set(poss)), len(set([key3(p) for p in pts3]))
+    dbg = (
+        "seed_raw:{0} seed_coerced:{1} seed_selected:{2} agents:{3} "
+        "unique_uv:{4} unique_pos:{5} unique_seed:{6} "
+        "slope_bias:{7:.3f} slope_power:{8:.3f}"
+    ).format(
+        len(pts_raw), len(pts3), sel_dbg[1], len(agents),
+        len(set(uvs)), len(set(poss)), len(set([key3(p) for p in pts3_selected])),
+        float(clamp01(seed_slope_bias)), float(seed_slope_power)
     )
-    return agents, dbg, pts3
+    return agents, dbg, pts3_selected
 
 # ---------------------------------------------------------------------------
 # Grasshopper script entry
@@ -405,7 +508,7 @@ class MyComponent(Grasshopper.Kernel.GH_ScriptInstance):
                 self.seed_preview = []
             else:
                 self.agents, self.dbg, self.seed_preview = build_agents_from_seed(
-                    srf, seed_points, max_speed
+                    srf, seed_points, max_speed, seed
                 )
             self._inited = True
 
