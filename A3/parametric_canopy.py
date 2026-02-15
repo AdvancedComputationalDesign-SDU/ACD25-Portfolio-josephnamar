@@ -17,7 +17,7 @@ root_points = []
 root_points_ground = []
 root_trunks = []
 support_branches = []
-supports = []
+supports = DataTree[object]()
 
 def coerce_face_or_surface(geo):
     g = getattr(geo, "Geometry", geo)
@@ -256,6 +256,14 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=Fals
 
     return dedupe_line_curves(trimmed)
 
+def level_map_to_tree(level_map):
+    tree = DataTree[object]()
+    for level in sorted(level_map.keys()):
+        path = GH_Path(int(level))
+        for crv in level_map.get(level, []):
+            tree.Add(crv, path)
+    return tree
+
 def generate_recursive_support_branches(
     root_ground_pts,
     root_top_pts,
@@ -269,7 +277,7 @@ def generate_recursive_support_branches(
     trim_tol=1e-3
 ):
     if depth <= 0:
-        return []
+        return [], {}
 
     def local_frame_from_direction(direction):
         d = rg.Vector3d(direction)
@@ -378,12 +386,14 @@ def generate_recursive_support_branches(
     max_level = int(depth)
 
     if trim_mesh is None:
-        raw_curves = []
+        level_curves = {}
         for level in range(max_level, 0, -1):
             for rec in level_records.get(level, []):
                 base_curve = rec["curve"]
                 if level != 1:
-                    raw_curves.append(base_curve)
+                    if level not in level_curves:
+                        level_curves[level] = []
+                    level_curves[level].append(base_curve)
                     continue
                 p0 = base_curve.PointAtStart
                 ext_dir = rg.Vector3d(rec["dir"])
@@ -394,11 +404,19 @@ def generate_recursive_support_branches(
                 ext_dir.Unitize()
                 tip = rec["tip"] + ext_dir * leaf_extension
                 if p0.DistanceTo(tip) > 1e-6:
-                    raw_curves.append(rg.Line(p0, tip).ToNurbsCurve())
-        return dedupe_line_curves(raw_curves)
+                    if level not in level_curves:
+                        level_curves[level] = []
+                    level_curves[level].append(rg.Line(p0, tip).ToNurbsCurve())
+
+        flat = []
+        for level in sorted(level_curves.keys()):
+            deduped_level = dedupe_line_curves(level_curves[level])
+            level_curves[level] = deduped_level
+            flat.extend(deduped_level)
+        return dedupe_line_curves(flat), level_curves
 
     kept_ids_by_level = {}
-    kept_curves = []
+    kept_level_curves = {}
 
     for level in range(1, max_level + 1):
         kept_ids = set()
@@ -438,12 +456,19 @@ def generate_recursive_support_branches(
                 [candidate_curve], trim_mesh, tol=trim_tol, cull_non_intersecting=cull_if_miss
             )
             if kept_piece:
-                kept_curves.extend(kept_piece)
+                if level not in kept_level_curves:
+                    kept_level_curves[level] = []
+                kept_level_curves[level].extend(kept_piece)
                 kept_ids.add(rec["id"])
 
         kept_ids_by_level[level] = kept_ids
 
-    return dedupe_line_curves(kept_curves)
+    flat = []
+    for level in sorted(kept_level_curves.keys()):
+        deduped_level = dedupe_line_curves(kept_level_curves[level])
+        kept_level_curves[level] = deduped_level
+        flat.extend(deduped_level)
+    return dedupe_line_curves(flat), kept_level_curves
 
 # ---------------------------------------------------------------------------
 # INPUT NORMALIZATION
@@ -602,7 +627,7 @@ if root_points and root_points_ground and rec_depth > 0:
                 trim_tol = max(trim_tol, float(doc.ModelAbsoluteTolerance))
         except:
             pass
-    support_branches = generate_recursive_support_branches(
+    support_branches, support_levels = generate_recursive_support_branches(
         root_points_ground[:root_count],
         root_points[:root_count],
         rec_depth,
@@ -616,8 +641,9 @@ if root_points and root_points_ground and rec_depth > 0:
     )
 else:
     support_branches = []
+    support_levels = {}
 
-supports = list(root_trunks) + list(support_branches)
+supports = level_map_to_tree(support_levels)
 
 # ---------------------------------------------------------------------------
 # FINAL OUTPUTS
