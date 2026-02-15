@@ -13,6 +13,9 @@ canopy_srf = None
 canopy_pts_flat = []
 canopy_pts_tree = DataTree[object]()
 H_out = []
+root_points = []
+root_points_ground = []
+root_trunks = []
 
 # Surface build candidates and runtime messages for debugging.
 canopy_srf_A = None
@@ -133,6 +136,38 @@ def as_float(value, default, min_value=None):
         out = float(min_value)
     return out
 
+def heightmap_local_minima_indices(H):
+    rows, cols = H.shape
+    minima = []
+    if rows < 3 or cols < 3:
+        idx = np.unravel_index(np.argmin(H), H.shape)
+        return [(int(idx[0]), int(idx[1]), float(H[idx]))]
+
+    for i in range(1, rows - 1):
+        for j in range(1, cols - 1):
+            h_ij = float(H[i, j])
+            is_local_min = True
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    if di == 0 and dj == 0:
+                        continue
+                    ni = i + di
+                    nj = j + dj
+                    if float(H[ni, nj]) < h_ij:
+                        is_local_min = False
+                        break
+                if not is_local_min:
+                    break
+            if is_local_min:
+                minima.append((i, j, h_ij))
+
+    if not minima:
+        idx = np.unravel_index(np.argmin(H), H.shape)
+        minima = [(int(idx[0]), int(idx[1]), float(H[idx]))]
+
+    minima.sort(key=lambda x: x[2])
+    return minima
+
 # ---------------------------------------------------------------------------
 # INPUT NORMALIZATION
 # ---------------------------------------------------------------------------
@@ -236,6 +271,20 @@ if canopy_srf is not None:
     debug.append("Final canopy_srf type: {}".format(type(canopy_srf).__name__))
 
 # ---------------------------------------------------------------------------
+# ROOT POINTS (FROM HEIGHTMAP MINIMA)
+# ---------------------------------------------------------------------------
+if pts_grid and bad_count == 0:
+    minima = heightmap_local_minima_indices(H)
+    for i, j, _ in minima:
+        p_top = pts_grid[i][j]
+        p_ground = rg.Point3d(p_top.X, p_top.Y, 0.0)
+        root_points.append(p_top)
+        root_points_ground.append(p_ground)
+        root_trunks.append(rg.Line(p_ground, p_top).ToNurbsCurve())
+
+    debug.append("Root points from local minima: {}".format(len(root_points)))
+
+# ---------------------------------------------------------------------------
 # TESSELLATION
 # ---------------------------------------------------------------------------
 panels = []
@@ -290,5 +339,8 @@ else:
 out_points_flat = canopy_pts_flat
 out_points_tree = canopy_pts_tree
 out_heightmap = H_out
+out_root_points = root_points
+out_root_points_ground = root_points_ground
+out_root_trunks = root_trunks
 out_panels = panels
 out_mesh = mesh
