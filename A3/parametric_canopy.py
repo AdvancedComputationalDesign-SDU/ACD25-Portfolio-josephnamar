@@ -183,6 +183,83 @@ def dedupe_line_curves(curves, precision=6):
         out.append(c)
     return out
 
+def build_projected_boundary_curve_from_grid(pts_grid):
+    if not pts_grid:
+        return None
+    rows = len(pts_grid)
+    cols = len(pts_grid[0]) if rows > 0 else 0
+    if rows < 2 or cols < 2:
+        return None
+
+    perimeter = []
+    for i in range(rows):
+        perimeter.append(pts_grid[i][0])
+    for j in range(1, cols):
+        perimeter.append(pts_grid[rows - 1][j])
+    for i in range(rows - 2, -1, -1):
+        perimeter.append(pts_grid[i][cols - 1])
+    for j in range(cols - 2, 0, -1):
+        perimeter.append(pts_grid[0][j])
+
+    projected = []
+    for p in perimeter:
+        if p is None:
+            continue
+        projected.append(rg.Point3d(float(p.X), float(p.Y), 0.0))
+    if len(projected) < 3:
+        return None
+
+    poly = rg.Polyline(projected + [projected[0]])
+    if not poly.IsValid or poly.Count < 4:
+        return None
+    return poly.ToNurbsCurve()
+
+def curve_within_projected_boundary(curve, boundary_crv, tol=1e-3, sample_count=7):
+    if curve is None:
+        return False
+    if boundary_crv is None:
+        return True
+    if sample_count < 2:
+        sample_count = 2
+
+    dom = curve.Domain
+    t0 = float(dom.T0)
+    t1 = float(dom.T1)
+    plane = rg.Plane.WorldXY
+
+    for i in range(sample_count):
+        u = float(i) / float(sample_count - 1)
+        t = t0 + (t1 - t0) * u
+        p = curve.PointAt(t)
+        p_xy = rg.Point3d(float(p.X), float(p.Y), 0.0)
+        inside = boundary_crv.Contains(p_xy, plane, tol)
+        if inside == rg.PointContainment.Outside:
+            return False
+    return True
+
+def cull_branches_outside_projected_boundary(curves, boundary_crv, tol=1e-3):
+    if not curves:
+        return []
+    if boundary_crv is None:
+        return list(curves)
+    kept = []
+    for c in curves:
+        if curve_within_projected_boundary(c, boundary_crv, tol=tol, sample_count=7):
+            kept.append(c)
+    return kept
+
+def cull_level_map_outside_projected_boundary(level_map, boundary_crv, tol=1e-3):
+    if not level_map:
+        return {}
+    if boundary_crv is None:
+        return dict(level_map)
+    out = {}
+    for level in level_map.keys():
+        kept = cull_branches_outside_projected_boundary(level_map[level], boundary_crv, tol=tol)
+        if kept:
+            out[level] = kept
+    return out
+
 def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=False):
     if not curves:
         return []
@@ -279,8 +356,16 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=Fals
 
     return dedupe_line_curves(trimmed)
 
-def build_root_stems_to_branch_start(root_ground_pts, root_top_pts, branch_start_height):
+def build_root_stems_to_branch_start(
+    root_ground_pts,
+    root_top_pts,
+    branch_start_height,
+    boundary_crv=None,
+    tol=1e-3
+):
     stems = []
+    kept_ground_pts = []
+    kept_top_pts = []
     root_count = min(len(root_ground_pts), len(root_top_pts))
     for idx in range(root_count):
         p_ground = root_ground_pts[idx]
@@ -294,9 +379,20 @@ def build_root_stems_to_branch_start(root_ground_pts, root_top_pts, branch_start
         trunk_dir.Unitize()
         start_dist = min(max(float(branch_start_height), 0.0), trunk_len)
         p_start = p_ground + trunk_dir * start_dist
+
+        if boundary_crv is not None:
+            p_xy = rg.Point3d(float(p_start.X), float(p_start.Y), 0.0)
+            inside = boundary_crv.Contains(p_xy, rg.Plane.WorldXY, tol)
+            if inside == rg.PointContainment.Outside:
+                continue
+
         if p_ground.DistanceTo(p_start) > 1e-6:
             stems.append(rg.Line(p_ground, p_start).ToNurbsCurve())
-    return stems
+
+        kept_ground_pts.append(p_ground)
+        kept_top_pts.append(p_top)
+
+    return stems, kept_ground_pts, kept_top_pts
 
 def level_map_to_tree(level_map, first_level_curves=None, reverse_recursive=True):
     tree = DataTree[object]()
@@ -326,7 +422,9 @@ def generate_recursive_support_branches(
     branch_start_height,
     extension_length,
     trim_mesh=None,
-    trim_tol=1e-3
+    trim_tol=1e-3,
+    boundary_crv=None,
+    boundary_tol=1e-3
 ):
     if depth <= 0:
         return [], {}
@@ -437,38 +535,79 @@ def generate_recursive_support_branches(
         leaf_extension = 10.0
     max_level = int(depth)
 
+    def apply_boundary_descendant_cull(kept_ids_by_level, curve_by_id):
+        if boundary_crv is None:
+            return kept_ids_by_level
+
+        outside_ids = set()
+        for level in kept_ids_by_level.keys():
+            for seg_id in kept_ids_by_level[level]:
+                crv = curve_by_id.get(seg_id)
+                if crv is None:
+                    continue
+                if not curve_within_projected_boundary(crv, boundary_crv, tol=boundary_tol, sample_count=7):
+                    outside_ids.add(seg_id)
+
+        to_remove = set(outside_ids)
+        queue = list(outside_ids)
+        while queue:
+            parent_id = queue.pop()
+            for child_id in children_by_parent.get(parent_id, []):
+                if child_id in curve_by_id and child_id not in to_remove:
+                    to_remove.add(child_id)
+                    queue.append(child_id)
+
+        if not to_remove:
+            return kept_ids_by_level
+
+        filtered = {}
+        for level in kept_ids_by_level.keys():
+            kept = set([sid for sid in kept_ids_by_level[level] if sid not in to_remove])
+            filtered[level] = kept
+        return filtered
+
     if trim_mesh is None:
-        level_curves = {}
-        for level in range(max_level, 0, -1):
+        kept_ids_by_level = {}
+        curve_by_id = {}
+        for level in range(1, max_level + 1):
+            kept_ids = set()
             for rec in level_records.get(level, []):
                 base_curve = rec["curve"]
                 if level != 1:
-                    if level not in level_curves:
-                        level_curves[level] = []
-                    level_curves[level].append(base_curve)
-                    continue
-                p0 = base_curve.PointAtStart
-                ext_dir = rg.Vector3d(rec["dir"])
-                if ext_dir.IsZero:
-                    ext_dir = rg.Vector3d(base_curve.PointAtEnd - p0)
-                if ext_dir.IsZero:
-                    continue
-                ext_dir.Unitize()
-                tip = rec["tip"] + ext_dir * leaf_extension
-                if p0.DistanceTo(tip) > 1e-6:
-                    if level not in level_curves:
-                        level_curves[level] = []
-                    level_curves[level].append(rg.Line(p0, tip).ToNurbsCurve())
+                    candidate_curve = base_curve
+                else:
+                    p0 = base_curve.PointAtStart
+                    ext_dir = rg.Vector3d(rec["dir"])
+                    if ext_dir.IsZero:
+                        ext_dir = rg.Vector3d(base_curve.PointAtEnd - p0)
+                    if ext_dir.IsZero:
+                        continue
+                    ext_dir.Unitize()
+                    tip = rec["tip"] + ext_dir * leaf_extension
+                    if p0.DistanceTo(tip) <= 1e-6:
+                        continue
+                    candidate_curve = rg.Line(p0, tip).ToNurbsCurve()
+
+                curve_by_id[rec["id"]] = candidate_curve
+                kept_ids.add(rec["id"])
+            kept_ids_by_level[level] = kept_ids
+
+        kept_ids_by_level = apply_boundary_descendant_cull(kept_ids_by_level, curve_by_id)
+
+        level_curves = {}
+        for level in sorted(kept_ids_by_level.keys()):
+            curves = [curve_by_id[sid] for sid in kept_ids_by_level[level] if sid in curve_by_id]
+            deduped_level = dedupe_line_curves(curves)
+            if deduped_level:
+                level_curves[level] = deduped_level
 
         flat = []
         for level in sorted(level_curves.keys()):
-            deduped_level = dedupe_line_curves(level_curves[level])
-            level_curves[level] = deduped_level
-            flat.extend(deduped_level)
+            flat.extend(level_curves[level])
         return dedupe_line_curves(flat), level_curves
 
     kept_ids_by_level = {}
-    kept_level_curves = {}
+    curve_by_id = {}
 
     for level in range(1, max_level + 1):
         kept_ids = set()
@@ -508,18 +647,22 @@ def generate_recursive_support_branches(
                 [candidate_curve], trim_mesh, tol=trim_tol, cull_non_intersecting=cull_if_miss
             )
             if kept_piece:
-                if level not in kept_level_curves:
-                    kept_level_curves[level] = []
-                kept_level_curves[level].extend(kept_piece)
+                curve_by_id[rec["id"]] = kept_piece[0]
                 kept_ids.add(rec["id"])
 
         kept_ids_by_level[level] = kept_ids
 
+    kept_ids_by_level = apply_boundary_descendant_cull(kept_ids_by_level, curve_by_id)
+    kept_level_curves = {}
+    for level in sorted(kept_ids_by_level.keys()):
+        curves = [curve_by_id[sid] for sid in kept_ids_by_level[level] if sid in curve_by_id]
+        deduped_level = dedupe_line_curves(curves)
+        if deduped_level:
+            kept_level_curves[level] = deduped_level
+
     flat = []
     for level in sorted(kept_level_curves.keys()):
-        deduped_level = dedupe_line_curves(kept_level_curves[level])
-        kept_level_curves[level] = deduped_level
-        flat.extend(deduped_level)
+        flat.extend(kept_level_curves[level])
     return dedupe_line_curves(flat), kept_level_curves
 
 # ---------------------------------------------------------------------------
@@ -550,6 +693,7 @@ max_branch_roots = as_int(globals().get("max_branch_roots", 8), 8, min_value=1)
 srf_obj = coerce_face_or_surface(srf)
 pts_grid = []
 bad_count = 0
+projected_boundary_crv = None
 
 if srf_obj is not None:
     du = srf_obj.Domain(0); dv = srf_obj.Domain(1)
@@ -604,6 +748,9 @@ if srf_obj is not None:
             canopy_srf = None
 
         canopy_pts_flat = Pts_A
+
+    if bad_count == 0:
+        projected_boundary_crv = build_projected_boundary_curve_from_grid(pts_grid)
 
 # ---------------------------------------------------------------------------
 # ROOT POINTS (FROM HEIGHTMAP MINIMA)
@@ -670,24 +817,31 @@ else:
 # RECURSIVE SUPPORT BRANCHES
 # ---------------------------------------------------------------------------
 support_root_count = min(len(root_points), len(root_points_ground), max_branch_roots)
-support_root_stems = build_root_stems_to_branch_start(
-    root_points_ground[:support_root_count],
-    root_points[:support_root_count],
-    branch_start_height
-) if support_root_count > 0 else []
+support_cull_tol = 1e-3
+try:
+    doc = Rhino.RhinoDoc.ActiveDoc
+    if doc is not None:
+        support_cull_tol = max(support_cull_tol, float(doc.ModelAbsoluteTolerance))
+except:
+    pass
 
-if support_root_count > 0 and rec_depth > 0:
-    trim_tol = 1e-3
-    if mesh is not None:
-        try:
-            doc = Rhino.RhinoDoc.ActiveDoc
-            if doc is not None:
-                trim_tol = max(trim_tol, float(doc.ModelAbsoluteTolerance))
-        except:
-            pass
-    support_branches, support_levels = generate_recursive_support_branches(
+if support_root_count > 0:
+    support_root_stems, support_root_ground_pts, support_root_top_pts = build_root_stems_to_branch_start(
         root_points_ground[:support_root_count],
         root_points[:support_root_count],
+        branch_start_height,
+        boundary_crv=projected_boundary_crv,
+        tol=support_cull_tol
+    )
+else:
+    support_root_stems = []
+    support_root_ground_pts = []
+    support_root_top_pts = []
+
+if support_root_ground_pts and rec_depth > 0:
+    support_branches, support_levels = generate_recursive_support_branches(
+        support_root_ground_pts,
+        support_root_top_pts,
         rec_depth,
         n_branches,
         br_length,
@@ -695,7 +849,9 @@ if support_root_count > 0 and rec_depth > 0:
         branch_start_height,
         extension_length,
         trim_mesh=mesh,
-        trim_tol=trim_tol
+        trim_tol=support_cull_tol,
+        boundary_crv=projected_boundary_crv,
+        boundary_tol=support_cull_tol
     )
 else:
     support_branches = []
