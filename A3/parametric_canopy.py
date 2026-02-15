@@ -183,6 +183,72 @@ def dedupe_line_curves(curves, precision=6):
         out.append(c)
     return out
 
+def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3):
+    if not curves:
+        return []
+    if mesh_obj is None or (not isinstance(mesh_obj, rg.Mesh)) or mesh_obj.Vertices.Count == 0:
+        return list(curves)
+
+    trimmed = []
+    for c in curves:
+        if c is None:
+            continue
+
+        p0 = c.PointAtStart
+        p1 = c.PointAtEnd
+        if p0.DistanceTo(p1) <= tol:
+            continue
+
+        line = rg.Line(p0, p1)
+        hit_raw = None
+        try:
+            hit_raw = rg.Intersect.Intersection.MeshLine(mesh_obj, line)
+        except:
+            hit_raw = None
+
+        hit_pts = []
+        if hit_raw is not None:
+            if isinstance(hit_raw, tuple):
+                for item in hit_raw:
+                    if item is None:
+                        continue
+                    try:
+                        for sub in item:
+                            if isinstance(sub, rg.Point3d):
+                                hit_pts.append(sub)
+                    except TypeError:
+                        if isinstance(item, rg.Point3d):
+                            hit_pts.append(item)
+            else:
+                try:
+                    for sub in hit_raw:
+                        if isinstance(sub, rg.Point3d):
+                            hit_pts.append(sub)
+                except TypeError:
+                    if isinstance(hit_raw, rg.Point3d):
+                        hit_pts.append(hit_raw)
+
+        if not hit_pts:
+            trimmed.append(c)
+            continue
+
+        first_hit = None
+        best_d = None
+        for hp in hit_pts:
+            d = p0.DistanceTo(hp)
+            if (best_d is None) or (d < best_d):
+                best_d = d
+                first_hit = hp
+
+        if first_hit is None:
+            trimmed.append(c)
+            continue
+
+        if p0.DistanceTo(first_hit) > tol:
+            trimmed.append(rg.Line(p0, first_hit).ToNurbsCurve())
+
+    return dedupe_line_curves(trimmed)
+
 def generate_recursive_support_branches(
     root_ground_pts,
     root_top_pts,
@@ -449,6 +515,15 @@ if root_points and root_points_ground and rec_depth > 0:
         len_reduct,
         branch_start_height
     )
+    if mesh is not None:
+        trim_tol = 1e-3
+        try:
+            doc = Rhino.RhinoDoc.ActiveDoc
+            if doc is not None:
+                trim_tol = max(trim_tol, float(doc.ModelAbsoluteTolerance))
+        except:
+            pass
+        support_branches = trim_branches_to_mesh(support_branches, mesh, trim_tol)
 else:
     support_branches = []
 
