@@ -6,15 +6,17 @@ import numpy as np
 from Grasshopper import DataTree
 from Grasshopper.Kernel.Data import GH_Path
 
-# --- outputs you already have ---
+# ---------------------------------------------------------------------------
+# OUTPUT VARIABLES
+# ---------------------------------------------------------------------------
 canopy_srf = None
 canopy_pts_flat = []
 canopy_pts_tree = DataTree[object]()
 H_out = []
 
-# --- optional debug outputs (create in GH if you want) ---
-canopy_srf_A = None  # flatten order A
-canopy_srf_B = None  # flatten order B
+# Surface build candidates and runtime messages for debugging.
+canopy_srf_A = None
+canopy_srf_B = None
 debug = []
 
 def coerce_face_or_surface(geo):
@@ -42,7 +44,7 @@ def generate_heightmap(du0, du1, dv0, dv1, U, V, amp, freq_u, freq_v, heightmap_
     np.random.seed(int(seed) if seed is not None else 0)
     u_vals = np.linspace(du0, du1, U + 1)
     v_vals = np.linspace(dv0, dv1, V + 1)
-    Ug, Vg = np.meshgrid(u_vals, v_vals, indexing="ij")  # (U+1, V+1)
+    Ug, Vg = np.meshgrid(u_vals, v_vals, indexing="ij")
 
     if int(heightmap_type) == 0:
         H = amp * np.sin(freq_u * Ug) * np.cos(freq_v * Vg)
@@ -57,27 +59,100 @@ def generate_heightmap(du0, du1, dv0, dv1, U, V, amp, freq_u, freq_v, heightmap_
 
     return Ug, Vg, H
 
+def build_surface_candidates(pts_grid, u_count, v_count, deg_u, deg_v):
+    # Candidate A uses i-major flattening.
+    pts_a = [pts_grid[i][j] for i in range(u_count) for j in range(v_count)]
+    # Candidate B uses j-major flattening.
+    pts_b = [pts_grid[i][j] for j in range(v_count) for i in range(u_count)]
+
+    srf_a = rg.NurbsSurface.CreateThroughPoints(pts_a, u_count, v_count, deg_u, deg_v, False, False)
+    srf_b = rg.NurbsSurface.CreateThroughPoints(pts_b, u_count, v_count, deg_u, deg_v, False, False)
+
+    return srf_a, pts_a, srf_b, pts_b
+
+def loft_surface_from_grid(pts_grid, u_count, v_count, along_u=True):
+    section_curves = []
+    if along_u:
+        for i in range(u_count):
+            row_pts = [pts_grid[i][j] for j in range(v_count)]
+            pl = rg.Polyline(row_pts)
+            if pl.IsValid and pl.Count >= 2:
+                section_curves.append(pl.ToNurbsCurve())
+    else:
+        for j in range(v_count):
+            col_pts = [pts_grid[i][j] for i in range(u_count)]
+            pl = rg.Polyline(col_pts)
+            if pl.IsValid and pl.Count >= 2:
+                section_curves.append(pl.ToNurbsCurve())
+
+    if len(section_curves) < 2:
+        return None
+
+    loft = rg.Brep.CreateFromLoft(
+        section_curves,
+        rg.Point3d.Unset,
+        rg.Point3d.Unset,
+        rg.LoftType.Normal,
+        False
+    )
+    if loft and len(loft) > 0 and loft[0] and loft[0].IsValid:
+        return loft[0]
+    return None
+
+def first_face_surface(brep_obj):
+    if brep_obj and isinstance(brep_obj, rg.Brep) and brep_obj.Faces.Count > 0:
+        return brep_obj.Faces[0].ToNurbsSurface()
+    return None
+
 def is_finite_point(p):
-    # Rhino Point3d has IsValid, but not NaN check; do both
+    # Check both Rhino validity and finite numeric values.
     if p is None or (not p.IsValid):
         return False
     x, y, z = p.X, p.Y, p.Z
-    if (x != x) or (y != y) or (z != z):  # NaN check
+    if (x != x) or (y != y) or (z != z):
         return False
     if abs(x) > 1e12 or abs(y) > 1e12 or abs(z) > 1e12:
         return False
     return True
 
-# --- sanitize inputs ---
-U = int(U) if U is not None else 30
-V = int(V) if V is not None else 15
-amp = float(amp) if amp is not None else 5.0
-freq_u = float(freq_u) if freq_u is not None else 1.0
-freq_v = float(freq_v) if freq_v is not None else 1.0
-heightmap_type = int(heightmap_type) if heightmap_type is not None else 0
-seed = int(seed) if seed is not None else 1
+def as_int(value, default, min_value=None):
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        out = int(default)
+    if min_value is not None and out < min_value:
+        out = int(min_value)
+    return out
+
+def as_float(value, default, min_value=None):
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        out = float(default)
+    if min_value is not None and out < min_value:
+        out = float(min_value)
+    return out
+
+# ---------------------------------------------------------------------------
+# INPUT NORMALIZATION
+# ---------------------------------------------------------------------------
+U = as_int(U, 30, min_value=1)
+V = as_int(V, 15, min_value=1)
+amp = as_float(amp, 5.0)
+freq_u = as_float(freq_u, 1.0)
+freq_v = as_float(freq_v, 1.0)
+heightmap_type = as_int(heightmap_type, 0, min_value=0)
+seed = as_int(seed, 1)
+
+debug.append(
+    "Inputs sanitized: U={}, V={}, amp={}, freq_u={}, freq_v={}, heightmap_type={}, seed={}".format(
+        U, V, amp, freq_u, freq_v, heightmap_type, seed
+    )
+)
 
 srf_obj = coerce_face_or_surface(srf)
+pts_grid = []
+bad_count = 0
 
 if srf_obj is None:
     debug.append("srf is None or could not be coerced.")
@@ -89,7 +164,7 @@ else:
     Ug, Vg, H = generate_heightmap(du0, du1, dv0, dv1, U, V, amp, freq_u, freq_v, heightmap_type, seed)
     H_out = H.tolist()
 
-    # Build grid and tree
+    # Sample displaced points and store them in list/tree form.
     pts_grid = [[None]*(V+1) for _ in range(U+1)]
     bad_count = 0
 
@@ -108,63 +183,75 @@ else:
     debug.append("Grid size expected: {} x {}".format(U+1, V+1))
     debug.append("Invalid/NaN points found: {}".format(bad_count))
 
-    # Two flatten orders
-    # A: i-major then j (row-major in U)
-    Pts_A = [pts_grid[i][j] for i in range(U+1) for j in range(V+1)]
-    # B: j-major then i (row-major in V)
-    Pts_B = [pts_grid[i][j] for j in range(V+1) for i in range(U+1)]
-
-    # Degrees
+    # Keep surface degree within valid limits for the current grid size.
     deg_u = 3 if (U + 1) >= 4 else max(1, (U + 1) - 1)
     deg_v = 3 if (V + 1) >= 4 else max(1, (V + 1) - 1)
 
     debug.append("Degrees used: ({}, {})".format(deg_u, deg_v))
 
-    # Try both surfaces using AddSrfPtGrid
-    guid_A = rs.AddSrfPtGrid((U+1, V+1), Pts_A, degree=(deg_u, deg_v))
-    guid_B = rs.AddSrfPtGrid((U+1, V+1), Pts_B, degree=(deg_u, deg_v))
+    srf_A, Pts_A, srf_B, Pts_B = build_surface_candidates(
+        pts_grid, U + 1, V + 1, deg_u, deg_v
+    )
 
-    canopy_srf_A = guid_A
-    canopy_srf_B = guid_B
+    canopy_srf_A = srf_A
+    canopy_srf_B = srf_B
 
-    debug.append("AddSrfPtGrid guid_A: {}".format(guid_A))
-    debug.append("AddSrfPtGrid guid_B: {}".format(guid_B))
+    debug.append("CreateThroughPoints A valid: {}".format(bool(srf_A and srf_A.IsValid)))
+    debug.append("CreateThroughPoints B valid: {}".format(bool(srf_B and srf_B.IsValid)))
 
-    # Choose the one that worked
-    if guid_A:
-        canopy_srf = guid_A
+    # Prefer direct NURBS reconstruction; fall back to loft if needed.
+    if srf_A and srf_A.IsValid:
+        canopy_srf = srf_A
         canopy_pts_flat = Pts_A
         debug.append("Chosen: A (i-major flatten).")
-    elif guid_B:
-        canopy_srf = guid_B
+    elif srf_B and srf_B.IsValid:
+        canopy_srf = srf_B
         canopy_pts_flat = Pts_B
         debug.append("Chosen: B (j-major flatten).")
     else:
-        canopy_srf = None
-        canopy_pts_flat = Pts_A
-        debug.append("Both surface builds failed. Most likely cause: invalid points or srf is problematic (trimmed/singular).")
+        loft_A = loft_surface_from_grid(pts_grid, U + 1, V + 1, along_u=True)
+        loft_B = loft_surface_from_grid(pts_grid, U + 1, V + 1, along_u=False)
+        debug.append("Loft fallback A valid: {}".format(bool(loft_A and loft_A.IsValid)))
+        debug.append("Loft fallback B valid: {}".format(bool(loft_B and loft_B.IsValid)))
 
-# -------------------------
-# Tessellation (Step 2)
-# -------------------------
+        if loft_A and loft_A.IsValid:
+            surf_from_loft_A = first_face_surface(loft_A)
+            canopy_srf = surf_from_loft_A if surf_from_loft_A else loft_A
+            debug.append("Chosen: Loft fallback A (sections along U). Face surface extracted: {}".format(bool(surf_from_loft_A)))
+        elif loft_B and loft_B.IsValid:
+            surf_from_loft_B = first_face_surface(loft_B)
+            canopy_srf = surf_from_loft_B if surf_from_loft_B else loft_B
+            debug.append("Chosen: Loft fallback B (sections along V). Face surface extracted: {}".format(bool(surf_from_loft_B)))
+        else:
+            canopy_srf = None
+            debug.append("All surface build attempts failed.")
+
+        canopy_pts_flat = Pts_A
+        debug.append("Most likely cause: grid ordering mismatch or problematic source surface/domain.")
+
+if canopy_srf is not None:
+    debug.append("Final canopy_srf type: {}".format(type(canopy_srf).__name__))
+
+# ---------------------------------------------------------------------------
+# TESSELLATION
+# ---------------------------------------------------------------------------
 panels_quads = []
 panels_tris = []
 mesh_quads = rg.Mesh()
 mesh_tris = rg.Mesh()
 
 if srf_obj is not None and bad_count == 0:
-    # Build vertices for meshes from pts_grid in a consistent indexing scheme:
-    # vertex index = i*(V+1) + j  (i-major, j-minor)
+    # Vertex index convention: i*(V+1) + j.
     rows = U + 1
     cols = V + 1
 
-    # Add vertices
+    # Add mesh vertices.
     for i in range(rows):
         for j in range(cols):
             mesh_quads.Vertices.Add(pts_grid[i][j])
             mesh_tris.Vertices.Add(pts_grid[i][j])
 
-    # Build faces + panel polylines per cell
+    # Build panel curves and corresponding mesh faces cell by cell.
     for i in range(rows - 1):
         for j in range(cols - 1):
             A = pts_grid[i][j]
@@ -172,26 +259,26 @@ if srf_obj is not None and bad_count == 0:
             C = pts_grid[i + 1][j + 1]
             D = pts_grid[i][j + 1]
 
-            # Quad polyline (closed)
+            # Quad panel.
             quad_pl = rg.Polyline([A, B, C, D, A])
             panels_quads.append(quad_pl.ToNurbsCurve())
 
-            # Two triangle polylines (closed)
+            # Two triangle panels from the same cell.
             tri1 = rg.Polyline([A, B, C, A])
             tri2 = rg.Polyline([A, C, D, A])
             panels_tris.append(tri1.ToNurbsCurve())
             panels_tris.append(tri2.ToNurbsCurve())
 
-            # Mesh indices
+            # Mesh indices for this cell.
             a = i * cols + j
             b = a + cols
             c = b + 1
             d = a + 1
 
-            # Quad mesh face (as quad)
+            # Quad face.
             mesh_quads.Faces.AddFace(a, b, c, d)
 
-            # Tri mesh faces (two triangles)
+            # Two triangle faces.
             mesh_tris.Faces.AddFace(a, b, c)
             mesh_tris.Faces.AddFace(a, c, d)
 
@@ -201,8 +288,19 @@ if srf_obj is not None and bad_count == 0:
     mesh_tris.Normals.ComputeNormals()
     mesh_tris.Compact()
 else:
-    # If you have invalid points, panels/meshes are unreliable
+    # Skip tessellation when point sampling is invalid.
     panels_quads = []
     panels_tris = []
     mesh_quads = None
     mesh_tris = None
+
+# ---------------------------------------------------------------------------
+# FINAL OUTPUTS
+# ---------------------------------------------------------------------------
+out_points_flat = canopy_pts_flat
+out_points_tree = canopy_pts_tree
+out_heightmap = H_out
+out_panels_quad = panels_quads
+out_panels_tri = panels_tris
+out_mesh_quad = mesh_quads
+out_mesh_tri = mesh_tris
