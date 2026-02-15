@@ -264,6 +264,7 @@ def generate_recursive_support_branches(
     base_length,
     length_reduction,
     branch_start_height,
+    extension_length,
     trim_mesh=None,
     trim_tol=1e-3
 ):
@@ -293,8 +294,29 @@ def generate_recursive_support_branches(
         return x_axis, y_axis
 
     root_count = min(len(root_ground_pts), len(root_top_pts))
-    non_leaf_segments = []
-    leaf_records = []
+    level_records = {}
+    children_by_parent = {}
+    next_seg_id = [0]
+
+    def add_record(level, parent_id, curve, tip_pt, direction):
+        seg_id = next_seg_id[0]
+        next_seg_id[0] += 1
+        rec = {
+            "id": seg_id,
+            "level": int(level),
+            "parent_id": parent_id,
+            "curve": curve,
+            "tip": tip_pt,
+            "dir": rg.Vector3d(direction)
+        }
+        if level not in level_records:
+            level_records[level] = []
+        level_records[level].append(rec)
+        if parent_id is not None:
+            if parent_id not in children_by_parent:
+                children_by_parent[parent_id] = []
+            children_by_parent[parent_id].append(seg_id)
+        return seg_id
 
     for idx in range(root_count):
         root_ground = root_ground_pts[idx]
@@ -323,7 +345,7 @@ def generate_recursive_support_branches(
 
         root_phase = (0.173 * float(start_pt.X) + 0.117 * float(start_pt.Y) + 0.619 * float(idx)) % (2.0 * np.pi)
 
-        def grow(point, direction, level, length):
+        def grow(point, direction, level, length, parent_id):
             if level <= 0 or length <= 1e-6:
                 return
 
@@ -344,37 +366,84 @@ def generate_recursive_support_branches(
 
                 end_pt = point + new_dir * float(length)
                 seg_curve = rg.Line(point, end_pt).ToNurbsCurve()
-                if level == 1:
-                    leaf_records.append((seg_curve, end_pt, rg.Vector3d(new_dir)))
-                else:
-                    non_leaf_segments.append(seg_curve)
-                    grow(end_pt, new_dir, level - 1, length * float(length_reduction))
+                seg_id = add_record(level, parent_id, seg_curve, end_pt, new_dir)
+                if level > 1:
+                    grow(end_pt, new_dir, level - 1, length * float(length_reduction), seg_id)
 
-        grow(start_pt, base_dir, depth, first_len)
+        grow(start_pt, base_dir, depth, first_len, None)
 
-    leaf_extension = 10.0
-    leaf_segments = []
-    for leaf_seg, tip_pt, tip_dir in leaf_records:
-        leaf_start = leaf_seg.PointAtStart
-        ext_dir = rg.Vector3d(tip_dir)
-        if ext_dir.IsZero:
-            continue
-
-        ext_dir.Unitize()
-        extended_tip = tip_pt + ext_dir * leaf_extension
-        if leaf_start.DistanceTo(extended_tip) > 1e-6:
-            leaf_segments.append(rg.Line(leaf_start, extended_tip).ToNurbsCurve())
+    leaf_extension = float(extension_length)
+    if leaf_extension <= 1e-6:
+        leaf_extension = 10.0
+    max_level = int(depth)
 
     if trim_mesh is None:
-        return dedupe_line_curves(list(non_leaf_segments) + list(leaf_segments))
+        raw_curves = []
+        for level in range(max_level, 0, -1):
+            for rec in level_records.get(level, []):
+                base_curve = rec["curve"]
+                if level != 1:
+                    raw_curves.append(base_curve)
+                    continue
+                p0 = base_curve.PointAtStart
+                ext_dir = rg.Vector3d(rec["dir"])
+                if ext_dir.IsZero:
+                    ext_dir = rg.Vector3d(base_curve.PointAtEnd - p0)
+                if ext_dir.IsZero:
+                    continue
+                ext_dir.Unitize()
+                tip = rec["tip"] + ext_dir * leaf_extension
+                if p0.DistanceTo(tip) > 1e-6:
+                    raw_curves.append(rg.Line(p0, tip).ToNurbsCurve())
+        return dedupe_line_curves(raw_curves)
 
-    kept_non_leaf = trim_branches_to_mesh(
-        non_leaf_segments, trim_mesh, tol=trim_tol, cull_non_intersecting=False
-    )
-    kept_leaf = trim_branches_to_mesh(
-        leaf_segments, trim_mesh, tol=trim_tol, cull_non_intersecting=True
-    )
-    return dedupe_line_curves(list(kept_non_leaf) + list(kept_leaf))
+    kept_ids_by_level = {}
+    kept_curves = []
+
+    for level in range(1, max_level + 1):
+        kept_ids = set()
+        for rec in level_records.get(level, []):
+            base_curve = rec["curve"]
+            p0 = base_curve.PointAtStart
+            tip_pt = rec["tip"]
+            ext_dir = rg.Vector3d(rec["dir"])
+            if ext_dir.IsZero:
+                ext_dir = rg.Vector3d(base_curve.PointAtEnd - p0)
+            if ext_dir.IsZero:
+                continue
+            ext_dir.Unitize()
+
+            if level == 1:
+                candidate_tip = tip_pt + ext_dir * leaf_extension
+                if p0.DistanceTo(candidate_tip) <= 1e-6:
+                    continue
+                candidate_curve = rg.Line(p0, candidate_tip).ToNurbsCurve()
+                cull_if_miss = True
+            else:
+                child_ids = children_by_parent.get(rec["id"], [])
+                lower_kept = kept_ids_by_level.get(level - 1, set())
+                has_kept_child = any(cid in lower_kept for cid in child_ids)
+                if has_kept_child:
+                    candidate_curve = base_curve
+                    cull_if_miss = False
+                else:
+                    level_extension = leaf_extension * (2.0 ** float(level - 1))
+                    candidate_tip = tip_pt + ext_dir * level_extension
+                    if p0.DistanceTo(candidate_tip) <= 1e-6:
+                        continue
+                    candidate_curve = rg.Line(p0, candidate_tip).ToNurbsCurve()
+                    cull_if_miss = True
+
+            kept_piece = trim_branches_to_mesh(
+                [candidate_curve], trim_mesh, tol=trim_tol, cull_non_intersecting=cull_if_miss
+            )
+            if kept_piece:
+                kept_curves.extend(kept_piece)
+                kept_ids.add(rec["id"])
+
+        kept_ids_by_level[level] = kept_ids
+
+    return dedupe_line_curves(kept_curves)
 
 # ---------------------------------------------------------------------------
 # INPUT NORMALIZATION
@@ -398,6 +467,7 @@ if len_reduct <= 0.0:
 if len_reduct >= 1.0:
     len_reduct = 0.95
 branch_start_height = as_float(globals().get("branch_start_height", 0.0), 0.0, min_value=0.0)
+extension_length = as_float(globals().get("extension_length", 10.0), 10.0, min_value=0.0)
 max_branch_roots = as_int(globals().get("max_branch_roots", 8), 8, min_value=1)
 
 srf_obj = coerce_face_or_surface(srf)
@@ -540,6 +610,7 @@ if root_points and root_points_ground and rec_depth > 0:
         br_length,
         len_reduct,
         branch_start_height,
+        extension_length,
         trim_mesh=mesh,
         trim_tol=trim_tol
     )
