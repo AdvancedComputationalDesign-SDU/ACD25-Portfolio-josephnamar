@@ -189,6 +189,23 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=Fals
     if mesh_obj is None or (not isinstance(mesh_obj, rg.Mesh)) or mesh_obj.Vertices.Count == 0:
         return list(curves)
 
+    mesh_vertices = [rg.Point3d(v.X, v.Y, v.Z) for v in mesh_obj.Vertices]
+    if not mesh_vertices:
+        return list(curves)
+
+    def closest_mesh_vertex(pt):
+        closest = None
+        best_d2 = None
+        for mv in mesh_vertices:
+            dx = mv.X - pt.X
+            dy = mv.Y - pt.Y
+            dz = mv.Z - pt.Z
+            d2 = (dx * dx) + (dy * dy) + (dz * dz)
+            if (best_d2 is None) or (d2 < best_d2):
+                best_d2 = d2
+                closest = mv
+        return closest
+
     trimmed = []
     for c in curves:
         if c is None:
@@ -251,8 +268,14 @@ def trim_branches_to_mesh(curves, mesh_obj, tol=1e-3, cull_non_intersecting=Fals
                 trimmed.append(c)
             continue
 
-        if p0.DistanceTo(first_hit) > tol:
-            trimmed.append(rg.Line(p0, first_hit).ToNurbsCurve())
+        snapped_hit = closest_mesh_vertex(first_hit)
+        if snapped_hit is None:
+            if not cull_non_intersecting:
+                trimmed.append(c)
+            continue
+
+        if p0.DistanceTo(snapped_hit) > tol:
+            trimmed.append(rg.Line(p0, snapped_hit).ToNurbsCurve())
 
     return dedupe_line_curves(trimmed)
 
