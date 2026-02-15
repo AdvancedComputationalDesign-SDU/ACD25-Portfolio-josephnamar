@@ -42,6 +42,28 @@ def iter_any(obj):
         return [obj]
 
 
+def normalize_agents_input(obj):
+    """
+    Accept list/tuple/wrapped inputs and return a clean list[Agent]-like objects.
+    Handles one-level wrapping such as (agents_list,) from a single-output builder.
+    """
+    items = iter_any(obj)
+    if len(items) == 1:
+        only = items[0]
+        try:
+            nested = [x for x in only]
+            if nested and hasattr(nested[0], "update"):
+                items = nested
+        except:
+            pass
+
+    out = []
+    for a in items:
+        if hasattr(a, "update") and hasattr(a, "position"):
+            out.append(a)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Read inputs
 # ---------------------------------------------------------------------------
@@ -52,7 +74,6 @@ if in_agents is None:
     if x is not None and hasattr(x, "agents"):
         in_agents = getattr(x, "agents", None)
 
-agents_state = iter_any(in_agents)
 step_flag = as_bool(globals().get("step", False), False)
 reset_flag = as_bool(globals().get("reset", False), False)
 
@@ -62,21 +83,41 @@ reset_flag = as_bool(globals().get("reset", False), False)
 # ---------------------------------------------------------------------------
 guid = str(ghenv.Component.InstanceGuid)
 k_prev = "A4_prev_step_" + guid
+k_prev_reset = "A4_prev_reset_" + guid
 k_step = "A4_step_count_" + guid
+k_agents = "A4_agents_state_" + guid
+k_last_disp = "A4_last_mean_disp_" + guid
 
 if k_prev not in sc.sticky:
     sc.sticky[k_prev] = False
+if k_prev_reset not in sc.sticky:
+    sc.sticky[k_prev_reset] = False
 if k_step not in sc.sticky:
     sc.sticky[k_step] = 0
+if k_last_disp not in sc.sticky:
+    sc.sticky[k_last_disp] = 0.0
 
 do_step = (step_flag is True) and (sc.sticky[k_prev] is False)
 sc.sticky[k_prev] = step_flag
+
+do_reset = (reset_flag is True) and (sc.sticky[k_prev_reset] is False)
+sc.sticky[k_prev_reset] = reset_flag
+
+# Persistent agent state lives in sticky and only re-initializes on reset.
+if do_reset or (k_agents not in sc.sticky):
+    sc.sticky[k_agents] = normalize_agents_input(in_agents)
+
+agents_state = sc.sticky.get(k_agents, [])
+if (not agents_state) and in_agents is not None:
+    # One-time recovery if sticky got cleared unexpectedly.
+    agents_state = normalize_agents_input(in_agents)
+    sc.sticky[k_agents] = agents_state
 
 
 # ---------------------------------------------------------------------------
 # Optional reset + simulation step
 # ---------------------------------------------------------------------------
-if reset_flag:
+if do_reset:
     for a in agents_state:
         uv0 = getattr(a, "uv0", None)
         srf = getattr(a, "surface", None)
@@ -86,6 +127,7 @@ if reset_flag:
                 a.position = rg.Point3d(srf.PointAt(uv0.X, uv0.Y))
             except:
                 pass
+
         try:
             a.velocity = rg.Vector3d(0, 0, 0)
         except:
@@ -99,6 +141,9 @@ if reset_flag:
         except:
             pass
 
+    sc.sticky[k_step] = 0
+    sc.sticky[k_last_disp] = 0.0
+
 prev_pos = {}
 for a in agents_state:
     p = getattr(a, "position", None)
@@ -107,6 +152,9 @@ for a in agents_state:
 
 update_fail_count = 0
 if do_step and agents_state:
+    step_disp_sum = 0.0
+    step_disp_count = 0
+
     for a in agents_state:
         try:
             a.update(agents_state)
@@ -121,9 +169,21 @@ if do_step and agents_state:
         if p_prev is not None and p_now is not None:
             try:
                 a.velocity = rg.Vector3d(rg.Point3d(p_now) - p_prev)
+                vlen = float(a.velocity.Length)
+                if vlen > 1e-9:
+                    step_disp_sum += vlen
+                    step_disp_count += 1
             except:
                 pass
+
     sc.sticky[k_step] = int(sc.sticky.get(k_step, 0)) + 1
+    if step_disp_count > 0:
+        sc.sticky[k_last_disp] = step_disp_sum / float(step_disp_count)
+    else:
+        sc.sticky[k_last_disp] = 0.0
+
+# Persist updated state for the next solve.
+sc.sticky[k_agents] = agents_state
 
 
 # ---------------------------------------------------------------------------
@@ -131,16 +191,30 @@ if do_step and agents_state:
 # ---------------------------------------------------------------------------
 P = []
 V = []
+vel_sum = 0.0
+vel_count = 0
+
 for a in agents_state:
     p = getattr(a, "position", None)
     if p is None:
         continue
+
     p3 = rg.Point3d(p)
     P.append(p3)
 
     vel = getattr(a, "velocity", None)
     if vel is not None and vel.Length > 1e-9:
+        vel_sum += float(vel.Length)
+        vel_count += 1
         V.append(rg.Line(p3, p3 + vel))
+    else:
+        # Fallback display: predicted direction from last decision, if available.
+        md = getattr(a, "move_dir", None)
+        sl = float(getattr(a, "step_len", 0.0))
+        if md is not None and hasattr(md, "Length") and md.Length > 1e-9 and sl > 1e-9:
+            md_u = rg.Vector3d(md)
+            md_u.Unitize()
+            V.append(rg.Line(p3, p3 + (md_u * sl)))
 
 agents = agents_state      # Preferred output name.
 agents_out = agents_state  # Alias output name.
@@ -149,7 +223,18 @@ D = "agents:{0} step_count:{1} stepped:{2} reset:{3}".format(
     len(agents_state),
     int(sc.sticky.get(k_step, 0)),
     do_step,
-    reset_flag
+    do_reset
 )
 if update_fail_count > 0:
     D += " update_fail:{0}".format(update_fail_count)
+
+if vel_count > 0:
+    D += " mean_disp:{0:.4f}".format(vel_sum / float(vel_count))
+else:
+    D += " mean_disp:0.0000"
+
+D += " last_step_disp:{0:.4f}".format(float(sc.sticky.get(k_last_disp, 0.0)))
+
+if len(P) > 0:
+    p0 = P[0]
+    D += " p0:({0:.3f},{1:.3f},{2:.3f})".format(float(p0.X), float(p0.Y), float(p0.Z))

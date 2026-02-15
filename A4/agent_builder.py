@@ -12,19 +12,40 @@ import Rhino.Geometry as rg
 # - seed         : int (optional). Random/NumPy seed for repeatable initialization noise.
 # - max_speed    : float. Base step size for each agent.
 # - seed_points  : list[Point3d]. Initial points projected to the surface as agent starts.
-# Optional builder-side seed shaping (set via additional GH inputs/globals):
-# - init_agent_count : int. Target count for initial agents (default = all seed points).
-# - seed_slope_bias  : float in [0..1]. 0 = uniform seed selection, 1 = strongly slope-biased.
-# - seed_slope_power : float >= 0.1. Higher values emphasize steeper zones.
 #
 # Outputs:
 # - agents       : list[Agent] for downstream simulation.
 # Notes:
 # - Debug values are still stored on the component instance as:
 #   self.dbg and self.seed_preview
-# - If seed_points is empty, a fallback UV grid is generated from:
-#   fallback_div_u, fallback_div_v (optional globals; default 8, 8).
+# - If seed_points is empty, a fallback UV grid is generated internally.
+# - Agent/seed tuning values are currently INTERNAL ONLY (constants below).
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# INTERNAL TUNING (edit here, no GH input required)
+# ---------------------------------------------------------------------------
+FALLBACK_DIV_U = 8
+FALLBACK_DIV_V = 8
+
+AGENT_FREEDOM = 0.75
+AGENT_BASE_SPACING = 1.25
+AGENT_CURV_GAIN = 0.25
+AGENT_SLOPE_GAIN = 1.2
+AGENT_SEP_GAIN = 1.2
+AGENT_COH_GAIN = 0.9
+AGENT_COH_RADIUS_MULT = 2.2
+AGENT_MOMENTUM = 0.6
+AGENT_CURV_SPEED_K = 1.2
+AGENT_SLOPE_SPEED_K = 0.9
+AGENT_SLOPE_SPACING_K = 0.8
+AGENT_CURV_FOLLOW_K = 1.5
+AGENT_EPS_FRAC = 0.01
+
+# Seed shaping. Set SEED_INIT_AGENT_COUNT to None to use all available seeds.
+SEED_INIT_AGENT_COUNT = None
+SEED_SLOPE_BIAS = 0.0
+SEED_SLOPE_POWER = 2.0
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -187,23 +208,31 @@ class Agent:
         self.base_speed = float(max_speed)
         self.max_speed = float(max_speed)
 
+        freedom = clamp01(float(AGENT_FREEDOM))
+        self.freedom = freedom
+
         # behavior parameters (tune)
-        self.base_spacing = 1.0
-        self.curv_gain = 0.25
-        self.slope_gain = 1.2
-        self.sep_gain = 1.0
-        self.home_gain = 0.1
-        self.noise_gain = 0.01
+        self.base_spacing = max(1e-6, float(AGENT_BASE_SPACING))
+        self.curv_gain = max(0.0, float(AGENT_CURV_GAIN))
+        self.slope_gain = max(0.0, float(AGENT_SLOPE_GAIN))
+        self.sep_gain = max(0.0, float(AGENT_SEP_GAIN))
+        self.coh_gain = max(0.0, float(AGENT_COH_GAIN))
+        self.coh_radius_mult = max(1.0, float(AGENT_COH_RADIUS_MULT))
+        self.momentum = clamp01(float(AGENT_MOMENTUM))
+
+        # Higher freedom -> weaker home pull + more exploratory jitter.
+        self.home_gain = 0.08 * (1.0 - freedom)
+        self.noise_gain = 0.002 + (0.012 * freedom)
 
         # modulation strengths (tune)
-        self.curv_speed_k = 3.0
-        self.slope_speed_k = 2.0
-        self.slope_spacing_k = 0.8
-        self.curv_follow_k = 1.5
+        self.curv_speed_k = max(0.0, float(AGENT_CURV_SPEED_K))
+        self.slope_speed_k = max(0.0, float(AGENT_SLOPE_SPEED_K))
+        self.slope_spacing_k = max(0.0, float(AGENT_SLOPE_SPACING_K))
+        self.curv_follow_k = max(0.0, float(AGENT_CURV_FOLLOW_K))
 
         # numerics
         self.noise = 0.003
-        self.eps_frac = 0.01
+        self.eps_frac = max(1e-6, float(AGENT_EPS_FRAC))
 
         # sensed values
         self.nearest_dist = None
@@ -319,7 +348,8 @@ class Agent:
 
         # speed slows on high curvature and steep slope
         speed = self.base_speed / (1.0 + self.curv_speed_k * k + self.slope_speed_k * s)
-        speed = max(0.001, min(self.base_speed, speed))
+        min_ratio = 0.20 + (0.40 * self.freedom)
+        speed = max(self.base_speed * min_ratio, min(self.base_speed, speed))
 
         # separation radius increases on steep slope (visible effect)
         R = self.base_spacing * (1.0 + self.slope_spacing_k * s)
@@ -329,25 +359,45 @@ class Agent:
         w_curv = self.curv_gain * (1.0 + self.curv_follow_k * k)
         w_slope = self.slope_gain
         w_sep = self.sep_gain
+        w_coh = self.coh_gain
         w_home = self.home_gain
         w_noise = self.noise_gain
 
         # Separation force (sum over neighbors within R)
         sep = rg.Vector3d(0, 0, 0)
+        coh_sum = rg.Vector3d(0, 0, 0)
+        coh_count = 0
+        R_coh = R * max(1.0, float(self.coh_radius_mult))
         for other in agents:
             if other is self:
                 continue
             d = self.position.DistanceTo(other.position)
             if d <= 1e-9 or d > R:
-                continue
-            v = rg.Vector3d(self.position - other.position)
-            if v.Length > 1e-9:
-                v.Unitize()
-            w = (R - d) / R
-            sep += v * w
+                if d <= 1e-9 or d > R_coh:
+                    continue
+            else:
+                v = rg.Vector3d(self.position - other.position)
+                if v.Length > 1e-9:
+                    v.Unitize()
+                w = (R - d) / R
+                sep += v * w
+
+            # Cohesion pulls toward neighborhood center (larger radius than separation).
+            if d <= R_coh:
+                coh_sum += rg.Vector3d(other.position - self.position)
+                coh_count += 1
 
         if sep.Length > 1e-9:
             sep.Unitize()
+
+        coh = rg.Vector3d(0, 0, 0)
+        if coh_count > 0:
+            coh = rg.Vector3d(coh_sum) * (1.0 / float(coh_count))
+            coh = project_to_tangent(coh, self.normal)
+            if coh.Length > 1e-9:
+                coh.Unitize()
+            else:
+                coh = rg.Vector3d(0, 0, 0)
 
         # Curvature flow direction (already tangent-ish, but project anyway)
         curv = rg.Vector3d(0, 0, 0)
@@ -386,10 +436,26 @@ class Agent:
             noise = rg.Vector3d(0, 0, 0)
 
         # Combine
-        move = (sep * w_sep) + (curv * w_curv) + (slope * w_slope) + (home * w_home) + (noise * w_noise)
+        move = (
+            (sep * w_sep) +
+            (coh * w_coh) +
+            (curv * w_curv) +
+            (slope * w_slope) +
+            (home * w_home) +
+            (noise * w_noise)
+        )
 
         # Tangent projection safety
         move = project_to_tangent(move, self.normal)
+
+        # Add directional continuity so each step responds to the previous one.
+        if hasattr(self, "velocity") and self.velocity is not None and self.velocity.Length > 1e-9:
+            vdir = rg.Vector3d(self.velocity)
+            vdir = project_to_tangent(vdir, self.normal)
+            if vdir.Length > 1e-9:
+                vdir.Unitize()
+                m = clamp01(float(self.momentum))
+                move = (move * (1.0 - m)) + (vdir * m)
 
         if move.Length > 1e-9:
             move.Unitize()
@@ -439,8 +505,8 @@ def build_agents_from_seed(surface, seed_points, max_speed, seed_val=None):
 
     # Fallback: if no explicit seed points, seed a regular UV lattice.
     if (not pts3) and (surface is not None):
-        div_u = as_int(globals().get("fallback_div_u", 8), 8, min_value=1)
-        div_v = as_int(globals().get("fallback_div_v", 8), 8, min_value=1)
+        div_u = as_int(FALLBACK_DIV_U, 8, min_value=1)
+        div_v = as_int(FALLBACK_DIV_V, 8, min_value=1)
         du = surface.Domain(0)
         dv = surface.Domain(1)
         for i in range(div_u + 1):
@@ -449,10 +515,13 @@ def build_agents_from_seed(surface, seed_points, max_speed, seed_val=None):
                 v = dv.T0 + (float(j) / float(div_v)) * (dv.T1 - dv.T0)
                 pts3.append(surface.PointAt(u, v))
 
-    # Optional slope-biased seeding (belongs in builder, not surface generator).
-    init_agent_count = as_int(globals().get("init_agent_count", len(pts3)), len(pts3), min_value=1)
-    seed_slope_bias = as_float(globals().get("seed_slope_bias", 0.0), 0.0)
-    seed_slope_power = as_float(globals().get("seed_slope_power", 2.0), 2.0, min_value=0.1)
+    # Internal slope-biased seeding (configured at top of file).
+    if SEED_INIT_AGENT_COUNT is None:
+        init_agent_count = len(pts3)
+    else:
+        init_agent_count = as_int(SEED_INIT_AGENT_COUNT, len(pts3), min_value=1)
+    seed_slope_bias = clamp01(float(SEED_SLOPE_BIAS))
+    seed_slope_power = max(0.1, float(SEED_SLOPE_POWER))
 
     pts3_selected, sel_dbg = select_seed_points(
         surface,
