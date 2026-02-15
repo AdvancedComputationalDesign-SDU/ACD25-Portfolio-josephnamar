@@ -105,11 +105,11 @@ class Agent:
 
         # behavior parameters (tune)
         self.base_spacing = 1.0
-        self.curv_gain = 0.6
-        self.slope_gain = 0.4
+        self.curv_gain = 0.25
+        self.slope_gain = 1.2
         self.sep_gain = 1.0
-        self.home_gain = 0.05
-        self.noise_gain = 0.02
+        self.home_gain = 0.1
+        self.noise_gain = 0.01
 
         # modulation strengths (tune)
         self.curv_speed_k = 3.0
@@ -127,7 +127,7 @@ class Agent:
         self.curv_mag = 0.0
         self.normal = rg.Vector3d(0, 0, 1)
         self.slope_mag = 0.0
-        self.downhill = rg.Vector3d(0, 0, 0)
+        self.slope_seek = rg.Vector3d(0, 0, 0)
 
     def sense(self, agents):
         # nearest neighbor distance only (for adaptive spacing)
@@ -143,7 +143,7 @@ class Agent:
         self.curv_dir = None
         self.curv_mag = 0.0
         self.slope_mag = 0.0
-        self.downhill = rg.Vector3d(0, 0, 0)
+        self.slope_seek = rg.Vector3d(0, 0, 0)
 
         try:
             # normal
@@ -176,7 +176,7 @@ class Agent:
                 else:
                     self.curv_dir = None
 
-            # downhill direction from finite-difference on height (Z)
+            # direction toward higher slope magnitude (finite-difference in UV)
             du = self.surface.Domain(0)
             dv = self.surface.Domain(1)
             eps_u = self.eps_frac * (du.T1 - du.T0)
@@ -186,31 +186,47 @@ class Agent:
             v0 = self.uv.Y
             p = self.position
 
-            pu = self.surface.PointAt(clamp_param(u0 + eps_u, du), v0)
-            pv = self.surface.PointAt(u0, clamp_param(v0 + eps_v, dv))
+            u_p = clamp_param(u0 + eps_u, du)
+            u_m = clamp_param(u0 - eps_u, du)
+            v_p = clamp_param(v0 + eps_v, dv)
+            v_m = clamp_param(v0 - eps_v, dv)
 
-            tu = rg.Vector3d(pu - p)
-            tv = rg.Vector3d(pv - p)
+            def slope_mag_at(uq, vq):
+                n_q = self.surface.NormalAt(uq, vq)
+                if n_q.IsZero:
+                    return 0.0
+                n_q.Unitize()
+                dz_q = abs(rg.Vector3d.Multiply(n_q, z))
+                return 1.0 - max(0.0, min(1.0, dz_q))
 
-            hu = pu.Z - p.Z
-            hv = pv.Z - p.Z
+            m_u_p = slope_mag_at(u_p, v0)
+            m_u_m = slope_mag_at(u_m, v0)
+            m_v_p = slope_mag_at(u0, v_p)
+            m_v_m = slope_mag_at(u0, v_m)
 
-            slope_vec = tu * hu + tv * hv
-            downhill = -slope_vec
+            # Gradient of slope magnitude in UV: move in +grad direction
+            grad_u = m_u_p - m_u_m
+            grad_v = m_v_p - m_v_m
 
-            downhill = project_to_tangent(downhill, n)
-            if downhill.Length > 1e-9:
-                downhill.Unitize()
-                self.downhill = downhill
+            p_u = self.surface.PointAt(u_p, v0)
+            p_v = self.surface.PointAt(u0, v_p)
+            tu = rg.Vector3d(p_u - p)
+            tv = rg.Vector3d(p_v - p)
+
+            slope_seek = (tu * grad_u) + (tv * grad_v)
+            slope_seek = project_to_tangent(slope_seek, n)
+            if slope_seek.Length > 1e-9:
+                slope_seek.Unitize()
+                self.slope_seek = slope_seek
             else:
-                self.downhill = rg.Vector3d(0, 0, 0)
+                self.slope_seek = rg.Vector3d(0, 0, 0)
 
         except:
             self.normal = rg.Vector3d(0, 0, 1)
             self.curv_dir = None
             self.curv_mag = 0.0
             self.slope_mag = 0.0
-            self.downhill = rg.Vector3d(0, 0, 0)
+            self.slope_seek = rg.Vector3d(0, 0, 0)
 
     def decide(self, agents):
         # Modulate parameters by curvature + slope
@@ -259,8 +275,8 @@ class Agent:
             else:
                 curv = rg.Vector3d(0, 0, 0)
 
-        # Slope drift (downhill)
-        slope = rg.Vector3d(self.downhill)
+        # Slope-seeking drift (toward steeper regions)
+        slope = rg.Vector3d(self.slope_seek)
         if slope.Length > 1e-9:
             slope.Unitize()
 

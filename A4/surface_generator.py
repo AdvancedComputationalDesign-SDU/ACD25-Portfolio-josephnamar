@@ -10,26 +10,29 @@ import math
 # ---------------------------------------------------------------------------
 # Required inputs:
 # - base_surface : Surface/BrepFace/Brep (if Brep, first face is used)
-# - divU         : int, U subdivisions
-# - divV         : int, V subdivisions
-# - frequency    : float, wave frequency for heightmap
+# - divU         : int, U subdivisions used to rebuild out_surface
+# - divV         : int, V subdivisions used to rebuild out_surface
+# - frequency    : float, wave frequency for the displacement field
 # - phase        : float, wave phase shift
 # - amplitude    : float, displacement amplitude along surface normal
 # - lift         : float, global Z offset after displacement
 #
 # Optional inputs:
-# - seed            : int, random seed (for deterministic random mode)
-# - heightmap_type  : int (0 = wave+bump, 1 = radial falloff + random noise)
+# - seed            : int, deterministic seed (mainly for noise mode)
+# - heightmap_type  : int (0 = wave+bump, 1 = radial falloff + deterministic noise)
+#
+# - point_divU      : int, optional output-point U subdivisions (independent of divU)
+# - point_divV      : int, optional output-point V subdivisions (independent of divV)
+#   Aliases supported: seed_divU/seed_divV, out_divU/out_divV
 #
 # Outputs:
 # - out_surface : generated displaced surface (NurbsSurface or Brep fallback)
-# - out_points  : flattened displaced Point3d grid used to create the surface
+# - out_points  : flattened displaced Point3d grid (uses point_divU/point_divV)
 # - srf_id      : compatibility output (always None in this RhinoCommon workflow)
 # ---------------------------------------------------------------------------
 
 
 def coerce_face_or_surface(geo):
-    """Coerce GH/Rhino input into a RhinoCommon Surface/BrepFace when possible."""
     g = getattr(geo, "Geometry", geo)
     try:
         import System
@@ -63,7 +66,6 @@ def as_float(value, default, min_value=None):
 
 
 def eval_point_normal(srf_obj, u, v):
-    """Sample a surface point + unitized normal; fallback normal is +Z."""
     pt = srf_obj.PointAt(u, v)
     n = srf_obj.NormalAt(u, v)
     if (not n.IsValid) or n.IsZero:
@@ -73,31 +75,67 @@ def eval_point_normal(srf_obj, u, v):
     return pt, n
 
 
-def generate_heightmap(U, V, amp, freq, phs, heightmap_type):
-    """Generate a displacement field in normalized UV space."""
-    un = np.linspace(0.0, 1.0, U + 1)
-    vn = np.linspace(0.0, 1.0, V + 1)
+def deterministic_noise(un, vn, seed_val):
+    # Deterministic pseudo-noise in [-1, 1], independent of grid resolution.
+    n = np.sin((12.9898 * un) + (78.233 * vn) + (37.719 * float(seed_val))) * 43758.5453
+    frac = n - np.floor(n)
+    return (frac * 2.0) - 1.0
+
+
+def evaluate_height_field(un, vn, amp, freq, phs, heightmap_type, seed_val):
+    if int(heightmap_type) == 0:
+        wave = np.sin((2.0 * math.pi * freq * (un + vn)) + phs)
+        dist = np.sqrt((un - 0.5) ** 2 + (vn - 0.5) ** 2)
+        bump = np.exp(-5.0 * dist ** 2)
+        return amp * (0.6 * wave + 0.4 * bump)
+
+    r = np.sqrt((un - 0.5) ** 2 + (vn - 0.5) ** 2)
+    mx = np.max(r) if np.max(r) != 0.0 else 1.0
+    falloff = 1.0 - (r / mx)
+    noise = deterministic_noise(un, vn, seed_val)
+    return amp * falloff * noise
+
+
+def sample_displaced_grid(
+    srf_obj,
+    dom_u,
+    dom_v,
+    u_div,
+    v_div,
+    amp,
+    freq,
+    phs,
+    heightmap_type,
+    lift_val,
+    seed_val
+):
+    # Parameter-space sampling.
+    u_vals = np.linspace(dom_u.T0, dom_u.T1, u_div + 1)
+    v_vals = np.linspace(dom_v.T0, dom_v.T1, v_div + 1)
+    Ug, Vg = np.meshgrid(u_vals, v_vals, indexing="ij")
+
+    # Normalized UV for displacement field evaluation.
+    un = np.linspace(0.0, 1.0, u_div + 1)
+    vn = np.linspace(0.0, 1.0, v_div + 1)
     Un, Vn = np.meshgrid(un, vn, indexing="ij")
 
-    if int(heightmap_type) == 0:
-        # Structured field: sinusoidal wave blended with central bump.
-        wave = np.sin((2.0 * math.pi * freq * (Un + Vn)) + phs)
-        dist = np.sqrt((Un - 0.5) ** 2 + (Vn - 0.5) ** 2)
-        bump = np.exp(-5.0 * dist ** 2)
-        H = amp * (0.6 * wave + 0.4 * bump)
-    else:
-        # Stochastic field: radial falloff multiplied by random noise.
-        R = np.sqrt((Un - 0.5) ** 2 + (Vn - 0.5) ** 2)
-        mx = np.max(R) if np.max(R) != 0.0 else 1.0
-        falloff = 1.0 - (R / mx)
-        noise = (np.random.rand(*R.shape) - 0.5) * 2.0
-        H = amp * falloff * noise
+    H = evaluate_height_field(Un, Vn, amp, freq, phs, heightmap_type, seed_val)
 
-    return H
+    pts_grid = [[None] * (v_div + 1) for _ in range(u_div + 1)]
+    pts_flat = []
+
+    for i in range(u_div + 1):
+        for j in range(v_div + 1):
+            pt, n = eval_point_normal(srf_obj, float(Ug[i, j]), float(Vg[i, j]))
+            p = pt + n * float(H[i, j])
+            p3 = rg.Point3d(float(p.X), float(p.Y), float(p.Z + lift_val))
+            pts_grid[i][j] = p3
+            pts_flat.append(p3)
+
+    return pts_grid, pts_flat
 
 
 def build_surface_candidates(pts_grid, u_count, v_count, deg_u, deg_v):
-    """Try both flattening orders when rebuilding a point-grid NurbsSurface."""
     pts_a = [pts_grid[i][j] for i in range(u_count) for j in range(v_count)]
     pts_b = [pts_grid[i][j] for j in range(v_count) for i in range(u_count)]
 
@@ -107,7 +145,6 @@ def build_surface_candidates(pts_grid, u_count, v_count, deg_u, deg_v):
 
 
 def loft_surface_from_grid(pts_grid, u_count, v_count, along_u=True):
-    """Fallback if direct point-grid Nurbs reconstruction fails."""
     curves = []
     if along_u:
         for i in range(u_count):
@@ -156,22 +193,35 @@ IN_amplitude = globals().get("amplitude", 1.0)
 IN_lift = globals().get("lift", 0.0)
 IN_heightmap_type = globals().get("heightmap_type", 0)
 
+# Independent output-point density controls.
+IN_point_divU = globals().get(
+    "point_divU",
+    globals().get("seed_divU", globals().get("out_divU", IN_divU))
+)
+IN_point_divV = globals().get(
+    "point_divV",
+    globals().get("seed_divV", globals().get("out_divV", IN_divV))
+)
+
 U = as_int(IN_divU, 24, min_value=1)
 V = as_int(IN_divV, 24, min_value=1)
+U_pts = as_int(IN_point_divU, U, min_value=1)
+V_pts = as_int(IN_point_divV, V, min_value=1)
+
 freq = as_float(IN_frequency, 1.0)
 phs = as_float(IN_phase, 0.0)
 amp = as_float(IN_amplitude, 1.0)
 lift_val = as_float(IN_lift, 0.0)
 heightmap_type = as_int(IN_heightmap_type, 0, min_value=0)
 
-# Keep seed deterministic when provided.
+seed_i = 0
 if IN_seed is not None:
     try:
         seed_i = int(IN_seed)
-        random.seed(seed_i)
-        np.random.seed(seed_i)
     except:
-        pass
+        seed_i = 0
+random.seed(seed_i)
+np.random.seed(seed_i)
 
 
 # ---------------------------------------------------------------------------
@@ -191,45 +241,56 @@ if srf_obj is not None and isinstance(srf_obj, (rg.Surface, rg.BrepFace)):
     dom_u = srf_obj.Domain(0)
     dom_v = srf_obj.Domain(1)
 
-    # Parameter-space sampling grid.
-    u_vals = np.linspace(dom_u.T0, dom_u.T1, U + 1)
-    v_vals = np.linspace(dom_v.T0, dom_v.T1, V + 1)
-    Ug, Vg = np.meshgrid(u_vals, v_vals, indexing="ij")
+    # 1) Build displaced grid used to reconstruct the output surface.
+    pts_grid_surface, pts_flat_surface = sample_displaced_grid(
+        srf_obj,
+        dom_u,
+        dom_v,
+        U,
+        V,
+        amp,
+        freq,
+        phs,
+        heightmap_type,
+        lift_val,
+        seed_i
+    )
 
-    # Heightmap drives normal displacement.
-    H = generate_heightmap(U, V, amp, freq, phs, heightmap_type)
-
-    # Sample displaced points.
-    pts_grid = [[None] * (V + 1) for _ in range(U + 1)]
-    for i in range(U + 1):
-        for j in range(V + 1):
-            pt, n = eval_point_normal(srf_obj, float(Ug[i, j]), float(Vg[i, j]))
-            p = pt + n * float(H[i, j])
-            pts_grid[i][j] = rg.Point3d(float(p.X), float(p.Y), float(p.Z + lift_val))
-
-    # Keep degrees valid for small grids.
     deg_u = 3 if (U + 1) >= 4 else max(1, U)
     deg_v = 3 if (V + 1) >= 4 else max(1, V)
 
-    # Preferred reconstruction: direct Nurbs through points.
     srf_a, pts_a, srf_b, pts_b = build_surface_candidates(
-        pts_grid, U + 1, V + 1, deg_u, deg_v
+        pts_grid_surface, U + 1, V + 1, deg_u, deg_v
     )
 
     if srf_a and srf_a.IsValid:
         out_surface = srf_a
-        out_points = pts_a
     elif srf_b and srf_b.IsValid:
         out_surface = srf_b
-        out_points = pts_b
     else:
-        # Fallback: loft across sampled rows/columns.
-        loft_a = loft_surface_from_grid(pts_grid, U + 1, V + 1, along_u=True)
-        loft_b = loft_surface_from_grid(pts_grid, U + 1, V + 1, along_u=False)
+        loft_a = loft_surface_from_grid(pts_grid_surface, U + 1, V + 1, along_u=True)
+        loft_b = loft_surface_from_grid(pts_grid_surface, U + 1, V + 1, along_u=False)
 
         if loft_a and loft_a.IsValid:
             out_surface = first_face_surface(loft_a) or loft_a
         elif loft_b and loft_b.IsValid:
             out_surface = first_face_surface(loft_b) or loft_b
 
-        out_points = pts_a
+    # 2) Build output points with independent density (for agent seeding/control).
+    if (U_pts == U) and (V_pts == V):
+        out_points = pts_flat_surface
+    else:
+        _, pts_flat_dense = sample_displaced_grid(
+            srf_obj,
+            dom_u,
+            dom_v,
+            U_pts,
+            V_pts,
+            amp,
+            freq,
+            phs,
+            heightmap_type,
+            lift_val,
+            seed_i
+        )
+        out_points = pts_flat_dense
