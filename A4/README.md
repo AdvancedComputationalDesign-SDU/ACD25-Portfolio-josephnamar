@@ -11,7 +11,7 @@ search_exclude: false
 
 [View on GitHub]({{ site.github.repository_url }})
 
-![Project overview](images/Base_image.png)
+![Project overview](images/agent_based.jpg)
 
 ---
 
@@ -280,6 +280,21 @@ Interpretation:
 
 - Left side: base surface input.
 - Right side: panelization outcome after 10 simulation counts.
+
+---
+
+### Curvature Analysis
+
+![Curvature analysis](images/carvature_analysis.png)
+![Curvature legend](images/gradient_legend.png)
+
+Legend:
+
+- `green` = low curvature
+- `red` = high curvature
+
+This image documents the curvature-field comparison used to evaluate how the
+agent distribution and reconstructed mesh relate to local geometric intensity.
 
 ---
 
