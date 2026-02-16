@@ -8,6 +8,14 @@ import Rhino.Geometry as rg
 # - agents : list[Agent] from agent_builder (preferred)
 # - step   : bool. Advances simulation only on rising edge (False->True)
 # - reset  : bool (optional). Resets agents to their start UV/position
+# Main live force inputs (recommended GH sliders):
+# - max_speed
+# - sep_gain
+# - coh_gain (or cohesion_gain)
+# - base_spacing
+# - freedom
+# - struct_spring_gain
+# - struct_min_dist_gain
 #
 # Backward compatibility:
 # - If `agents` input is not wired, script will try legacy `x.agents`.
@@ -64,6 +72,31 @@ def normalize_agents_input(obj):
     return out
 
 
+def collect_runtime_params():
+    """
+    Collect main force parameters from simulator GH inputs.
+    Keys are normalized to names used by Agent.apply_runtime_params.
+    """
+    alias_map = {
+        "max_speed": ["max_speed", "max_speed_live", "speed"],
+        "sep_gain": ["sep_gain"],
+        "coh_gain": ["coh_gain", "cohesion_gain"],
+        "base_spacing": ["base_spacing"],
+        "freedom": ["freedom"],
+        "struct_spring_gain": ["struct_spring_gain"],
+        "struct_min_dist_gain": ["struct_min_dist_gain"],
+    }
+
+    out = {}
+    for key, aliases in alias_map.items():
+        for name in aliases:
+            val = globals().get(name, None)
+            if val is not None:
+                out[key] = val
+                break
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Read inputs
 # ---------------------------------------------------------------------------
@@ -76,6 +109,7 @@ if in_agents is None:
 
 step_flag = as_bool(globals().get("step", False), False)
 reset_flag = as_bool(globals().get("reset", False), False)
+runtime_params = collect_runtime_params()
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +146,15 @@ if (not agents_state) and in_agents is not None:
     # One-time recovery if sticky got cleared unexpectedly.
     agents_state = normalize_agents_input(in_agents)
     sc.sticky[k_agents] = agents_state
+
+# Apply live slider values every solve so next step always uses latest params.
+if agents_state and runtime_params:
+    for a in agents_state:
+        try:
+            if hasattr(a, "apply_runtime_params"):
+                a.apply_runtime_params(runtime_params)
+        except:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +200,11 @@ if do_step and agents_state:
 
     for a in agents_state:
         try:
-            a.update(agents_state)
+            try:
+                a.update(agents_state, runtime_params)
+            except TypeError:
+                # Backward compatibility with older Agent.update(self, agents).
+                a.update(agents_state)
         except:
             # Keep stepping robust if one agent fails.
             update_fail_count += 1
@@ -227,6 +274,12 @@ D = "agents:{0} step_count:{1} stepped:{2} reset:{3}".format(
 )
 if update_fail_count > 0:
     D += " update_fail:{0}".format(update_fail_count)
+if len(runtime_params) > 0:
+    keys = sorted([str(k) for k in runtime_params.keys()])
+    preview = ",".join(keys[:6])
+    if len(keys) > 6:
+        preview += ",..."
+    D += " params:{0}[{1}]".format(len(runtime_params), preview)
 
 if vel_count > 0:
     D += " mean_disp:{0:.4f}".format(vel_sum / float(vel_count))
