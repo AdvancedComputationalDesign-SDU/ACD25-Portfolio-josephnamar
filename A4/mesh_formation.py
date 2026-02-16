@@ -19,24 +19,47 @@ import rhinoscriptsyntax as rs
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def as_list(x):
+def _is_point_like(x):
     if x is None:
-        return []
-    try:
-        items = list(x)
-    except:
-        return [x]
+        return False
+    if isinstance(x, rg.Point3d):
+        return True
+    if hasattr(x, "position"):
+        return True
+    if hasattr(x, "Location"):
+        return True
+    if hasattr(x, "X") and hasattr(x, "Y") and hasattr(x, "Z"):
+        return True
+    return False
 
-    # One-level unwrap for common GH case: (points_list,)
-    if len(items) == 1:
-        only = items[0]
-        try:
-            nested = list(only)
-            if len(nested) > 0:
-                return nested
-        except:
-            pass
-    return items
+
+def _flatten_any(obj, out):
+    if obj is None:
+        return
+    if _is_point_like(obj):
+        out.append(obj)
+        return
+    if isinstance(obj, (str, bytes)):
+        out.append(obj)
+        return
+    try:
+        items = list(obj)
+    except:
+        out.append(obj)
+        return
+    if len(items) == 0:
+        return
+    for it in items:
+        _flatten_any(it, out)
+
+
+def as_list(x):
+    """
+    Deep-flatten common GH wrappers/data-tree-like nesting into a point-candidate list.
+    """
+    out = []
+    _flatten_any(x, out)
+    return out
 
 
 def as_bool(v, default=False):
@@ -50,23 +73,6 @@ def as_bool(v, default=False):
     if s in ("0", "false", "f", "no", "n", "off"):
         return False
     return bool(default)
-
-
-def as_int(v, default, min_value=None):
-    try:
-        out = int(v)
-    except:
-        out = int(default)
-    if min_value is not None and out < min_value:
-        out = int(min_value)
-    return out
-
-
-def as_float(v, default):
-    try:
-        return float(v)
-    except:
-        return float(default)
 
 
 def clamp01(x):
@@ -155,58 +161,42 @@ def project_points_to_uv(surface, pts):
     return uv, valid_pts, bad
 
 
-def infer_grid_dims(n, aspect_uv):
-    """
-    Infer (u_count, v_count) from number of points using factor pairs.
-    Chooses pair whose u/v ratio best matches surface UV aspect.
-    """
-    if n < 4:
-        return None
+def collect_mesh_edges(mesh):
+    edge_set = set()
+    for f in mesh.Faces:
+        if f.IsTriangle:
+            pairs = ((f.A, f.B), (f.B, f.C), (f.C, f.A))
+        else:
+            pairs = ((f.A, f.B), (f.B, f.C), (f.C, f.D), (f.D, f.A))
+        for i, j in pairs:
+            if i > j:
+                i, j = j, i
+            edge_set.add((i, j))
+    return edge_set
 
-    candidates = []
-    r = int(n ** 0.5)
-    for a in range(2, r + 1):
-        if n % a != 0:
+
+def orient_triangle_faces_up(mesh):
+    """
+    Enforce upward (+Z) winding for triangle faces.
+    """
+    verts = mesh.Vertices
+    for fi in range(mesh.Faces.Count):
+        f = mesh.Faces[fi]
+        if not f.IsTriangle:
             continue
-        b = n // a
-        candidates.append((a, b))
-        if a != b:
-            candidates.append((b, a))
-
-    if not candidates:
-        return None
-
-    best = None
-    best_err = None
-    target = max(1e-9, float(aspect_uv))
-    for u_count, v_count in candidates:
-        ratio = float(u_count) / float(v_count)
-        err = abs(ratio - target)
-        if (best_err is None) or (err < best_err):
-            best_err = err
-            best = (u_count, v_count)
-
-    return best
-
-
-def build_quad_faces(u_count, v_count):
-    """
-    Flat index convention: idx = i * v_count + j
-    where i in [0, u_count-1], j in [0, v_count-1].
-    """
-    quads = []
-    for i in range(u_count - 1):
-        for j in range(v_count - 1):
-            a = i * v_count + j
-            b = (i + 1) * v_count + j
-            c = (i + 1) * v_count + (j + 1)
-            d = i * v_count + (j + 1)
-            quads.append((a, b, c, d))
-    return quads
+        a = int(f.A)
+        b = int(f.B)
+        c = int(f.C)
+        pa = rg.Point3d(verts[a].X, verts[a].Y, verts[a].Z)
+        pb = rg.Point3d(verts[b].X, verts[b].Y, verts[b].Z)
+        pc = rg.Point3d(verts[c].X, verts[c].Y, verts[c].Z)
+        n = rg.Vector3d.CrossProduct(rg.Vector3d(pb - pa), rg.Vector3d(pc - pa))
+        if n.Z < 0.0:
+            mesh.Faces.SetFace(fi, a, c, b)
 
 
 # -----------------------
-# Optional fallback triangulation
+# Delaunay triangulation (UV)
 # -----------------------
 def orient2d(ax, ay, bx, by, cx, cy):
     return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
@@ -354,23 +344,15 @@ else:
                     for (a, b, c) in tris:
                         mesh.Faces.AddFace(int(a), int(b), int(c))
 
+                    orient_triangle_faces_up(mesh)
                     mesh.Normals.ComputeNormals()
                     mesh.Compact()
                     out_mesh = mesh
 
-                    edge_set = set()
-                    for f in mesh.Faces:
-                        if not f.IsTriangle:
-                            continue
-                        A, B, C = f.A, f.B, f.C
-                        for i, j in ((A, B), (B, C), (C, A)):
-                            if i > j:
-                                i, j = j, i
-                            edge_set.add((i, j))
-
+                    edge_set = collect_mesh_edges(mesh)
                     for i, j in edge_set:
                         out_edges.append(rg.Line(mesh.Vertices[i], mesh.Vertices[j]))
 
-                    dbg = "OK(dynamic_tris): input:{} valid:{} bad:{} tris:{} edges:{} topology:rebuilt".format(
+                    dbg = "OK(dynamic_tris_up): input:{} valid:{} bad:{} tris:{} edges:{} topology:rebuilt".format(
                         len(pts), n, bad, mesh.Faces.Count, len(edge_set)
                     )
