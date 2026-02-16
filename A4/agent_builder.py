@@ -30,17 +30,40 @@ FALLBACK_DIV_V = 8
 
 AGENT_FREEDOM = 0.75
 AGENT_BASE_SPACING = 1.25
-AGENT_CURV_GAIN = 0.25
-AGENT_SLOPE_GAIN = 1.2
-AGENT_SEP_GAIN = 1.2
-AGENT_COH_GAIN = 0.9
-AGENT_COH_RADIUS_MULT = 2.2
+AGENT_CURV_GAIN = 0.45
+AGENT_SLOPE_GAIN = 0.95
+AGENT_SEP_GAIN = 1.85
+AGENT_COH_GAIN = 0.72
+AGENT_COH_RADIUS_MULT = 2.0
 AGENT_MOMENTUM = 0.6
 AGENT_CURV_SPEED_K = 1.2
 AGENT_SLOPE_SPEED_K = 0.9
 AGENT_SLOPE_SPACING_K = 0.8
 AGENT_CURV_FOLLOW_K = 1.5
 AGENT_EPS_FRAC = 0.01
+# Neighborhood mean-slope modulation for group behavior:
+# steeper local neighborhoods -> stronger separation and slightly weaker cohesion.
+AGENT_GROUP_SLOPE_GAIN = 0.55
+# Peer slope-follow rule:
+# if neighbor slope is higher than self, self is gently attracted toward that neighbor.
+AGENT_SLOPE_PEER_GAIN = 0.45
+AGENT_SLOPE_DIFF_MIN = 0.04
+# Reference-like stability controls.
+AGENT_CURV_USE_MAX = True
+AGENT_CURV_SCALE = 0.08
+AGENT_CURV_DAMP = 0.60
+AGENT_SLOPE_DAMP = 0.25
+AGENT_HARDCORE_RATIO = 0.35
+AGENT_HARDCORE_BOOST = 2.0
+AGENT_SEP_VEC_CAP = 3.0
+# Structural constraints (quad-preserving behavior).
+STRUCT_ENABLE = True
+STRUCT_GRID_U = None         # set int to force grid U count; None = infer
+STRUCT_GRID_V = None         # set int to force grid V count; None = infer
+STRUCT_USE_DIAGONALS = False # True adds diagonal structural springs
+STRUCT_SPRING_GAIN = 0.65    # spring toward rest edge lengths
+STRUCT_MIN_DIST_RATIO = 0.70 # minimum allowed fraction of structural rest length
+STRUCT_MIN_DIST_GAIN = 1.45  # push strength when structural edges collapse
 
 # Seed shaping. Set SEED_INIT_AGENT_COUNT to None to use all available seeds.
 SEED_INIT_AGENT_COUNT = None
@@ -193,14 +216,146 @@ def select_seed_points(surface, pts3, target_count, slope_bias, slope_power, see
     selected = [candidates[int(i)] for i in idx]
     return selected, (m, len(selected))
 
+
+def infer_grid_dims(n, aspect_uv):
+    """
+    Infer (u_count, v_count) from total point count using factor pairs.
+    Chooses pair whose u/v ratio best matches surface UV aspect.
+    """
+    n = as_int(n, 0, min_value=0)
+    if n < 4:
+        return None
+
+    candidates = []
+    r = int(n ** 0.5)
+    for a in range(2, r + 1):
+        if n % a != 0:
+            continue
+        b = n // a
+        candidates.append((a, b))
+        if a != b:
+            candidates.append((b, a))
+
+    if not candidates:
+        return None
+
+    target = max(1e-9, float(aspect_uv))
+    best = None
+    best_err = None
+    for u_count, v_count in candidates:
+        ratio = float(u_count) / float(v_count)
+        err = abs(ratio - target)
+        if (best_err is None) or (err < best_err):
+            best_err = err
+            best = (u_count, v_count)
+    return best
+
+
+def assign_structural_links(agents, surface):
+    """
+    Build structural neighbor graph (grid edges) and rest edge lengths.
+    Assumes current ordering corresponds to row-major UV grid:
+      idx = i * v_count + j
+    """
+    for a in agents:
+        a.struct_i = -1
+        a.struct_j = -1
+        a.struct_neighbors = []
+        a.struct_rest_lengths = []
+
+    if (not bool(STRUCT_ENABLE)) or (not agents):
+        return {
+            "enabled": False,
+            "reason": "disabled_or_empty",
+            "u_count": 0,
+            "v_count": 0,
+            "links": 0
+        }
+
+    n = len(agents)
+    u_count = None
+    v_count = None
+
+    if (STRUCT_GRID_U is not None) and (STRUCT_GRID_V is not None):
+        u_try = as_int(STRUCT_GRID_U, 0, min_value=2)
+        v_try = as_int(STRUCT_GRID_V, 0, min_value=2)
+        if (u_try * v_try) == n:
+            u_count, v_count = u_try, v_try
+
+    if (u_count is None) or (v_count is None):
+        dom_u = surface.Domain(0)
+        dom_v = surface.Domain(1)
+        du = abs(float(dom_u.T1 - dom_u.T0))
+        dv = abs(float(dom_v.T1 - dom_v.T0))
+        aspect = (du / dv) if dv > 1e-12 else 1.0
+        dims = infer_grid_dims(n, aspect)
+        if dims is not None:
+            u_count, v_count = dims
+
+    if (u_count is None) or (v_count is None) or (u_count < 2) or (v_count < 2) or ((u_count * v_count) != n):
+        return {
+            "enabled": False,
+            "reason": "dims_not_inferred",
+            "u_count": 0,
+            "v_count": 0,
+            "links": 0
+        }
+
+    if bool(STRUCT_USE_DIAGONALS):
+        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+    else:
+        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+    total_links = 0
+    for i in range(u_count):
+        for j in range(v_count):
+            idx = (i * v_count) + j
+            a = agents[idx]
+            a.struct_i = i
+            a.struct_j = j
+
+            neighbors = []
+            rest_lengths = []
+            p = a.position
+
+            for di, dj in offsets:
+                ni = i + di
+                nj = j + dj
+                if ni < 0 or ni >= u_count or nj < 0 or nj >= v_count:
+                    continue
+                nidx = (ni * v_count) + nj
+                q = agents[nidx].position
+                d = float(p.DistanceTo(q))
+                if d <= 1e-9:
+                    continue
+                neighbors.append(int(nidx))
+                rest_lengths.append(d)
+
+            a.struct_neighbors = neighbors
+            a.struct_rest_lengths = rest_lengths
+            total_links += len(neighbors)
+
+    return {
+        "enabled": True,
+        "reason": "ok",
+        "u_count": int(u_count),
+        "v_count": int(v_count),
+        "links": int(total_links)
+    }
+
 # ---------------------------------------------------------------------------
 # Agent definition
 # ---------------------------------------------------------------------------
 class Agent:
-    def __init__(self, surface, uv, max_speed):
+    def __init__(self, surface, uv, max_speed, idx=None):
         self.surface = surface
         self.uv = rg.Point2d(uv.X, uv.Y)
         self.uv0 = rg.Point2d(uv.X, uv.Y)
+        self.idx = as_int(idx, -1) if idx is not None else -1
+        self.struct_i = -1
+        self.struct_j = -1
+        self.struct_neighbors = []
+        self.struct_rest_lengths = []
 
         self.position = rg.Point3d(surface.PointAt(self.uv.X, self.uv.Y))
         self.velocity = rg.Vector3d(0, 0, 0)
@@ -276,13 +431,21 @@ class Agent:
                 k0 = abs(sc.Kappa(0)); k1 = abs(sc.Kappa(1))
                 d0 = sc.Direction(0); d1 = sc.Direction(1)
 
-                # choose minimum curvature direction
-                if k0 <= k1:
-                    self.curv_dir = d0
-                    self.curv_mag = k0
+                # Choose dominant curvature direction (reference-style behavior).
+                if bool(AGENT_CURV_USE_MAX):
+                    if k0 >= k1:
+                        self.curv_dir = d0
+                        self.curv_mag = k0
+                    else:
+                        self.curv_dir = d1
+                        self.curv_mag = k1
                 else:
-                    self.curv_dir = d1
-                    self.curv_mag = k1
+                    if k0 <= k1:
+                        self.curv_dir = d0
+                        self.curv_mag = k0
+                    else:
+                        self.curv_dir = d1
+                        self.curv_mag = k1
 
                 if self.curv_dir is not None and self.curv_dir.Length > 1e-9:
                     self.curv_dir.Unitize()
@@ -342,53 +505,100 @@ class Agent:
             self.slope_seek = rg.Vector3d(0, 0, 0)
 
     def decide(self, agents):
-        # Modulate parameters by curvature + slope
+        # Surface-conditioned scalars.
         k = max(0.0, float(self.curv_mag))
         s = max(0.0, min(1.0, float(self.slope_mag)))
 
-        # speed slows on high curvature and steep slope
-        speed = self.base_speed / (1.0 + self.curv_speed_k * k + self.slope_speed_k * s)
-        min_ratio = 0.20 + (0.40 * self.freedom)
-        speed = max(self.base_speed * min_ratio, min(self.base_speed, speed))
+        # Reference-like speed damping: sharp slowdown on high curvature,
+        # then a secondary slowdown on steep slope.
+        curv_scale = max(1e-9, float(AGENT_CURV_SCALE))
+        curv_norm = k / (k + curv_scale)
+        speed_scale = (1.0 - clamp01(float(AGENT_CURV_DAMP) * curv_norm))
+        speed_scale *= (1.0 - clamp01(float(AGENT_SLOPE_DAMP) * s))
+        speed_scale /= (
+            1.0 +
+            (0.35 * self.curv_speed_k * curv_norm) +
+            (0.25 * self.slope_speed_k * s)
+        )
+        min_ratio = 0.10 + (0.40 * self.freedom)
+        speed_scale = max(min_ratio, min(1.0, speed_scale))
+        speed = self.base_speed * speed_scale
 
-        # separation radius increases on steep slope (visible effect)
+        # Neighborhood radii.
         R = self.base_spacing * (1.0 + self.slope_spacing_k * s)
         R = max(1e-6, R)
+        R_coh = R * max(1.0, float(self.coh_radius_mult))
+        hard_core = max(1e-9, float(AGENT_HARDCORE_RATIO) * R)
 
-        # curvature-follow weight increases with curvature
+        # Direction weights.
         w_curv = self.curv_gain * (1.0 + self.curv_follow_k * k)
         w_slope = self.slope_gain
         w_sep = self.sep_gain
         w_coh = self.coh_gain
+        w_peer = max(0.0, float(AGENT_SLOPE_PEER_GAIN))
+        w_struct_spring = max(0.0, float(STRUCT_SPRING_GAIN))
+        w_struct_min = max(0.0, float(STRUCT_MIN_DIST_GAIN))
         w_home = self.home_gain
         w_noise = self.noise_gain
 
-        # Separation force (sum over neighbors within R)
+        # Neighbor accumulation.
         sep = rg.Vector3d(0, 0, 0)
         coh_sum = rg.Vector3d(0, 0, 0)
         coh_count = 0
-        R_coh = R * max(1.0, float(self.coh_radius_mult))
+        peer_slope_vec = rg.Vector3d(0, 0, 0)
+        local_slope_sum = s
+        local_slope_count = 1
+        slope_diff_min = max(0.0, float(AGENT_SLOPE_DIFF_MIN))
+
         for other in agents:
             if other is self:
                 continue
             d = self.position.DistanceTo(other.position)
-            if d <= 1e-9 or d > R:
-                if d <= 1e-9 or d > R_coh:
-                    continue
-            else:
-                v = rg.Vector3d(self.position - other.position)
-                if v.Length > 1e-9:
-                    v.Unitize()
-                w = (R - d) / R
-                sep += v * w
+            if d <= 1e-9:
+                continue
 
-            # Cohesion pulls toward neighborhood center (larger radius than separation).
+            # Distance-weighted repulsion, with a hard-core push to avoid overlap.
+            if d <= R:
+                away = rg.Vector3d(self.position - other.position)
+                if away.Length > 1e-9:
+                    away.Unitize()
+                    falloff = max(0.0, (R - d) / R)
+                    if d < hard_core:
+                        hc = max(0.0, (hard_core - d) / hard_core)
+                        falloff *= (1.0 + (float(AGENT_HARDCORE_BOOST) * hc))
+                    sep += away * falloff
+
             if d <= R_coh:
                 coh_sum += rg.Vector3d(other.position - self.position)
                 coh_count += 1
 
-        if sep.Length > 1e-9:
-            sep.Unitize()
+                # Neighborhood slope context + low-slope follower behavior.
+                o_s = getattr(other, "slope_mag", None)
+                if o_s is not None:
+                    try:
+                        o_s_val = max(0.0, min(1.0, float(o_s)))
+                        local_slope_sum += o_s_val
+                        local_slope_count += 1
+
+                        if o_s_val > (s + slope_diff_min):
+                            to_other = rg.Vector3d(other.position - self.position)
+                            if to_other.Length > 1e-9:
+                                to_other.Unitize()
+                                w_sd = o_s_val - s
+                                w_dist = max(0.0, (R_coh - d) / max(1e-9, R_coh))
+                                peer_slope_vec += to_other * (w_sd * w_dist)
+                    except:
+                        pass
+
+        # Keep repulsion magnitude (for crowd pressure), only cap extreme values.
+        sep = project_to_tangent(sep, self.normal)
+        sep_len = sep.Length
+        if sep_len > 1e-9:
+            sep_cap = max(1e-6, float(AGENT_SEP_VEC_CAP))
+            if sep_len > sep_cap:
+                sep *= (sep_cap / sep_len)
+        else:
+            sep = rg.Vector3d(0, 0, 0)
 
         coh = rg.Vector3d(0, 0, 0)
         if coh_count > 0:
@@ -399,7 +609,55 @@ class Agent:
             else:
                 coh = rg.Vector3d(0, 0, 0)
 
-        # Curvature flow direction (already tangent-ish, but project anyway)
+        peer_slope = project_to_tangent(peer_slope_vec, self.normal)
+        if peer_slope.Length > 1e-9:
+            peer_slope.Unitize()
+        else:
+            peer_slope = rg.Vector3d(0, 0, 0)
+
+        # Structural constraints (fixed neighbors from initial grid):
+        # 1) spring toward rest edge lengths
+        # 2) hard minimum edge length to resist local inversion/swapping
+        struct_spring = rg.Vector3d(0, 0, 0)
+        struct_min_push = rg.Vector3d(0, 0, 0)
+        min_ratio = max(0.05, float(STRUCT_MIN_DIST_RATIO))
+        if bool(STRUCT_ENABLE):
+            n_ids = getattr(self, "struct_neighbors", [])
+            n_rest = getattr(self, "struct_rest_lengths", [])
+            n_count = min(len(n_ids), len(n_rest))
+            for k_idx in range(n_count):
+                oi = int(n_ids[k_idx])
+                if oi < 0 or oi >= len(agents):
+                    continue
+                other = agents[oi]
+                rest = max(1e-6, float(n_rest[k_idx]))
+                to_other = rg.Vector3d(other.position - self.position)
+                d = float(to_other.Length)
+                if d <= 1e-9:
+                    continue
+                to_other.Unitize()
+
+                # Hooke-like spring in direction of neighbor.
+                stretch = (d - rest) / rest
+                struct_spring += to_other * stretch
+
+                # Minimum-length barrier.
+                min_d = min_ratio * rest
+                if d < min_d:
+                    collapse = (min_d - d) / max(1e-9, min_d)
+                    struct_min_push -= to_other * collapse
+
+        struct_spring = project_to_tangent(struct_spring, self.normal)
+        struct_min_push = project_to_tangent(struct_min_push, self.normal)
+
+        # Steeper neighborhoods: more spacing pressure, a bit less cohesion.
+        mean_slope_local = local_slope_sum / float(max(1, local_slope_count))
+        sep_group_scale = 1.0 + (float(AGENT_GROUP_SLOPE_GAIN) * mean_slope_local)
+        coh_group_scale = max(
+            0.35,
+            1.0 - (0.35 * float(AGENT_GROUP_SLOPE_GAIN) * mean_slope_local)
+        )
+
         curv = rg.Vector3d(0, 0, 0)
         if self.curv_dir is not None:
             curv = rg.Vector3d(self.curv_dir)
@@ -409,12 +667,11 @@ class Agent:
             else:
                 curv = rg.Vector3d(0, 0, 0)
 
-        # Slope-seeking drift (toward steeper regions)
         slope = rg.Vector3d(self.slope_seek)
         if slope.Length > 1e-9:
             slope.Unitize()
 
-        # Home spring (to original uv point on surface)
+        # Home spring (to original uv point on surface).
         home_pt = self.surface.PointAt(self.uv0.X, self.uv0.Y)
         home = rg.Vector3d(home_pt - self.position)
         home = project_to_tangent(home, self.normal)
@@ -423,7 +680,7 @@ class Agent:
         else:
             home = rg.Vector3d(0, 0, 0)
 
-        # Noise (3D, then tangent)
+        # Noise (3D, then tangent).
         noise = rg.Vector3d(
             random.uniform(-1.0, 1.0),
             random.uniform(-1.0, 1.0),
@@ -435,20 +692,23 @@ class Agent:
         else:
             noise = rg.Vector3d(0, 0, 0)
 
-        # Combine
+        # Combine.
         move = (
-            (sep * w_sep) +
-            (coh * w_coh) +
+            (sep * (w_sep * sep_group_scale)) +
+            (coh * (w_coh * coh_group_scale)) +
+            (peer_slope * w_peer) +
+            (struct_spring * w_struct_spring) +
+            (struct_min_push * w_struct_min) +
             (curv * w_curv) +
             (slope * w_slope) +
             (home * w_home) +
             (noise * w_noise)
         )
 
-        # Tangent projection safety
+        # Tangent projection safety.
         move = project_to_tangent(move, self.normal)
 
-        # Add directional continuity so each step responds to the previous one.
+        # Directional continuity.
         if hasattr(self, "velocity") and self.velocity is not None and self.velocity.Length > 1e-9:
             vdir = rg.Vector3d(self.velocity)
             vdir = project_to_tangent(vdir, self.normal)
@@ -462,7 +722,7 @@ class Agent:
         else:
             move = rg.Vector3d(0, 0, 0)
 
-        # Store per-step step length
+        # Store per-step movement.
         self.step_len = speed
         self.move_dir = move
         self.rep_radius = R
@@ -541,19 +801,26 @@ def build_agents_from_seed(surface, seed_points, max_speed, seed_val=None):
         if not ok:
             continue
         uv = rg.Point2d(u, v)
-        a = Agent(surface, uv, max_speed)
+        a = Agent(surface, uv, max_speed, idx=len(agents))
         agents.append(a)
         uvs.append(key2(u, v))
         poss.append(key3(a.position))
 
+    struct_info = assign_structural_links(agents, surface)
+
     dbg = (
         "seed_raw:{0} seed_coerced:{1} seed_selected:{2} agents:{3} "
         "unique_uv:{4} unique_pos:{5} unique_seed:{6} "
-        "slope_bias:{7:.3f} slope_power:{8:.3f}"
+        "slope_bias:{7:.3f} slope_power:{8:.3f} "
+        "struct:{9} dims:{10}x{11} links:{12}"
     ).format(
         len(pts_raw), len(pts3), sel_dbg[1], len(agents),
         len(set(uvs)), len(set(poss)), len(set([key3(p) for p in pts3_selected])),
-        float(clamp01(seed_slope_bias)), float(seed_slope_power)
+        float(clamp01(seed_slope_bias)), float(seed_slope_power),
+        "on" if bool(struct_info.get("enabled", False)) else "off:" + str(struct_info.get("reason", "na")),
+        int(struct_info.get("u_count", 0)),
+        int(struct_info.get("v_count", 0)),
+        int(struct_info.get("links", 0))
     )
     return agents, dbg, pts3_selected
 
