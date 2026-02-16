@@ -11,7 +11,7 @@ search_exclude: false
 
 [View on GitHub]({{ site.github.repository_url }})
 
-![Project overview placeholder](images/a4_overview_placeholder.png)
+![Project overview](images/Base_image.png)
 
 ---
 
@@ -223,40 +223,63 @@ out_edges = unique_mesh_edges(out_mesh)
 
 ## Results
 
-### Variation A - Balanced Flocking (Placeholder)
+### Base Surface
 
-![Variation A placeholder](images/a4_variation_a_placeholder.png)
+![Base surface](images/Base_image.png)
 
----
-
-### Variation B - Strong Separation / Open Pattern (Placeholder)
-
-![Variation B placeholder](images/a4_variation_b_placeholder.png)
+The base image above is the common starting condition used for all behavior
+intent tests.
 
 ---
 
-### Variation C - Strong Structural Constraint / Ordered Pattern (Placeholder)
+### Behavior Intent 01 - Curvature-Led
 
-![Variation C placeholder](images/a4_variation_c_placeholder.png)
+![Curvature-led behavior (left: base surface, right: final outcome)](images/carvature_led.png)
+
+Run settings:
+
+- `counts = 10`
+- `curv_gain = 1.40`
+- `slope_gain = 0.25`
+
+Interpretation:
+
+- Left side: base surface input.
+- Right side: panelization outcome after 10 simulation counts.
 
 ---
 
-### Agent Trajectories and Field Visualization (Placeholder)
+### Behavior Intent 02 - Slope-Led
 
-![Trajectories placeholder](images/a4_trajectories_placeholder.png)
-![Field visualization placeholder](images/a4_field_placeholder.png)
+![Slope-led behavior (left: base surface, right: final outcome)](images/slope_led.png)
+
+Run settings:
+
+- `counts = 10`
+- `curv_gain = 0.25`
+- `slope_gain = 1.60`
+
+Interpretation:
+
+- Left side: base surface input.
+- Right side: panelization outcome after 10 simulation counts.
 
 ---
 
-### Final Panelization Outputs (Placeholders)
+### Behavior Intent 03 - Hybrid Balance
 
-| View 1 | View 2 |
-| --- | --- |
-| ![](images/a4_final_panelization_01_placeholder.png) | ![](images/a4_final_panelization_02_placeholder.png) |
+![Hybrid behavior (left: base surface, right: final outcome)](images/hybrid_balance.png)
 
-| Detail 1 | Detail 2 |
-| --- | --- |
-| ![](images/a4_final_detail_01_placeholder.png) | ![](images/a4_final_detail_02_placeholder.png) |
+Run settings:
+
+- `counts = 10`
+- `curv_gain = 0.95`
+- `slope_gain = 1.00`
+
+Interpretation:
+
+- Left side: base surface input.
+- Right side: panelization outcome after 10 simulation counts.
 
 ---
 
@@ -281,8 +304,10 @@ repulsion, and runtime slider tuning.
 
 ## Reproducibility
 
-Recommended baseline values used in this setup:
+Common settings used for all three behavior intents:
 
+- `counts = 10` (simulation steps)
+- `max_speed = 1.00`
 - `sep_gain = 1.85`
 - `coh_gain = 0.72`
 - `base_spacing = 1.25`
@@ -290,12 +315,18 @@ Recommended baseline values used in this setup:
 - `struct_spring_gain = 0.65`
 - `struct_min_dist_gain = 1.45`
 
+Intent-specific settings:
+
+1. Curvature-led: `curv_gain = 1.40`, `slope_gain = 0.25`
+2. Slope-led: `curv_gain = 0.25`, `slope_gain = 1.60`
+3. Hybrid balance: `curv_gain = 0.95`, `slope_gain = 1.00`
+
 Notes:
 
 1. Keep a fixed `seed` for comparable runs.
 2. Use edge-trigger stepping (`step` toggles) in simulator.
-3. Reset agents when changing initial conditions (`reset = True` once).
-4. Capture at least three slider regimes for final variation comparisons.
+3. Reset agents before each run (`reset = True` once).
+4. Use the same surface and seed-point input for all three intents.
 
 ---
 
