@@ -98,10 +98,9 @@ agent seeding.
 `agent_builder.py` handles:
 
 1. Coercion of incoming seed points to `Point3d`.
-2. Optional fallback UV grid if no seed points are supplied.
-3. Optional slope-biased seed selection.
-4. Agent object creation with initial UV, position, velocity, and defaults.
-5. Structural neighbor link assignment (grid inference + rest lengths).
+2. Direct agent creation from provided seed points (no builder fallback seeding).
+3. Agent object creation with initial UV, position, velocity, and state fields.
+4. Structural neighbor link assignment (grid inference + rest lengths).
 
 Each `Agent` stores:
 
@@ -149,6 +148,8 @@ Main runtime sliders:
 - `coh_gain` (or `cohesion_gain`)
 - `base_spacing`
 - `freedom`
+- `curv_gain`
+- `slope_gain`
 - `struct_spring_gain`
 - `struct_min_dist_gain`
 
@@ -180,8 +181,9 @@ out_points = sample_seed_points(displaced_points, point_density)
 
 ```python
 # agent_builder.py
-seed_pts = coerce_or_fallback_seed_points(seed_points, surface)
-seed_pts = optional_slope_biased_selection(seed_pts, slope_bias, slope_power)
+seed_pts = coerce_seed_points(seed_points, surface)
+if not seed_pts:
+    return error("seed_points is empty or invalid")
 agents = [Agent(surface, uv_from_point(p), max_speed) for p in seed_pts]
 assign_structural_links(agents)  # neighbors + rest lengths
 return agents

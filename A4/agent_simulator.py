@@ -14,6 +14,8 @@ import Rhino.Geometry as rg
 # - coh_gain (or cohesion_gain)
 # - base_spacing
 # - freedom
+# - curv_gain
+# - slope_gain
 # - struct_spring_gain
 # - struct_min_dist_gain
 #
@@ -27,7 +29,24 @@ import Rhino.Geometry as rg
 # - D                   : debug string
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# RUNTIME DEFAULTS (used when sliders are unwired)
+# ---------------------------------------------------------------------------
+RUNTIME_DEFAULTS = {
+    "max_speed": 1.0,
+    "sep_gain": 1.85,
+    "coh_gain": 0.72,
+    "base_spacing": 1.25,
+    "freedom": 0.75,
+    "curv_gain": 0.45,
+    "slope_gain": 0.95,
+    "struct_spring_gain": 0.65,
+    "struct_min_dist_gain": 1.45,
+}
 
+# ---------------------------------------------------------------------------
+# HELPERS
+# ---------------------------------------------------------------------------
 def as_bool(value, default=False):
     if value is None:
         return bool(default)
@@ -83,11 +102,13 @@ def collect_runtime_params():
         "coh_gain": ["coh_gain", "cohesion_gain"],
         "base_spacing": ["base_spacing"],
         "freedom": ["freedom"],
+        "curv_gain": ["curv_gain"],
+        "slope_gain": ["slope_gain"],
         "struct_spring_gain": ["struct_spring_gain"],
         "struct_min_dist_gain": ["struct_min_dist_gain"],
     }
 
-    out = {}
+    out = dict(RUNTIME_DEFAULTS)
     for key, aliases in alias_map.items():
         for name in aliases:
             val = globals().get(name, None)
@@ -98,7 +119,7 @@ def collect_runtime_params():
 
 
 # ---------------------------------------------------------------------------
-# Read inputs
+# READ INPUTS
 # ---------------------------------------------------------------------------
 in_agents = globals().get("agents", None)
 if in_agents is None:
@@ -113,7 +134,7 @@ runtime_params = collect_runtime_params()
 
 
 # ---------------------------------------------------------------------------
-# Sticky state (edge-trigger stepping)
+# STICKY STATE (edge-trigger stepping)
 # ---------------------------------------------------------------------------
 guid = str(ghenv.Component.InstanceGuid)
 k_prev = "A4_prev_step_" + guid
@@ -158,7 +179,7 @@ if agents_state and runtime_params:
 
 
 # ---------------------------------------------------------------------------
-# Optional reset + simulation step
+# OPTIONAL RESET + SIMULATION STEP
 # ---------------------------------------------------------------------------
 if do_reset:
     for a in agents_state:
@@ -234,7 +255,7 @@ sc.sticky[k_agents] = agents_state
 
 
 # ---------------------------------------------------------------------------
-# Outputs
+# OUTPUTS
 # ---------------------------------------------------------------------------
 P = []
 V = []

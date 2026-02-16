@@ -3,23 +3,35 @@ import numpy as np
 import rhinoscriptsyntax as rs
 import Rhino.Geometry as rg
 
-FALLBACK_DIV_U = 8
-FALLBACK_DIV_V = 8
-SEED_CFG = {"init_agent_count": None, "slope_bias": 0.0, "slope_power": 2.0}
+# ---------------------------------------------------------------------------
+# INPUT CONTRACT (Grasshopper)
+# ---------------------------------------------------------------------------
+# Inputs:
+# - reset        : bool. Rebuilds agents when True.
+# - base_surface : Surface/BrepFace/Brep (if Brep, first face is used)
+# - seed         : int (optional). Seeds random + numpy for repeatability.
+# - max_speed    : float. Base step length for each agent.
+# - seed_points  : list[Point3d]. Required explicit seed points.
+#
+# Outputs:
+# - agents       : list[Agent]
+# - dbg          : debug string (if output port exists)
+# - seed_preview : accepted seed points (if output port exists)
+#
+# Notes:
+# - Builder no longer generates fallback seeds. Provide `seed_points`.
+# - Main force defaults/controls live in `agent_simulator.py`.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# INTERNAL CONFIG
+# ---------------------------------------------------------------------------
+# Structural graph setup only. Force defaults live in agent_simulator.py.
 STRUCT_CFG = {"grid_u": None, "grid_v": None, "use_diagonals": False}
-AGENT_DEFAULTS = {
-    "freedom": 0.75, "base_spacing": 1.25, "curv_gain": 0.45, "slope_gain": 0.95,
-    "sep_gain": 1.85, "coh_gain": 0.72, "coh_radius_mult": 2.0, "momentum": 0.6,
-    "curv_speed_k": 1.2, "slope_speed_k": 0.9, "slope_spacing_k": 0.8,
-    "curv_follow_k": 1.5, "eps_frac": 0.01, "group_slope_gain": 0.55,
-    "slope_peer_gain": 0.45, "slope_diff_min": 0.04, "curv_use_max": True,
-    "curv_scale": 0.08, "curv_damp": 0.60, "slope_damp": 0.25,
-    "hardcore_ratio": 0.35, "hardcore_boost": 2.0, "sep_vec_cap": 3.0,
-    "struct_enable": True, "struct_spring_gain": 0.65,
-    "struct_min_dist_ratio": 0.70, "struct_min_dist_gain": 1.45,
-}
 
-
+# ---------------------------------------------------------------------------
+# SCALAR HELPERS
+# ---------------------------------------------------------------------------
 def as_int(value, default, min_value=None):
     try:
         out = int(value)
@@ -47,7 +59,9 @@ def clamp01(x):
 def clamp_param(t, dom):
     return dom.T0 if t < dom.T0 else (dom.T1 if t > dom.T1 else t)
 
-
+# ---------------------------------------------------------------------------
+# INPUT COERCION
+# ---------------------------------------------------------------------------
 def seed_everything(seed):
     if seed is None:
         return
@@ -97,16 +111,9 @@ def to_point3d(pt):
 def project_to_tangent(v, n):
     return v - n * rg.Vector3d.Multiply(v, n)
 
-
-def slope_magnitude_from_normal(n):
-    if n is None or n.IsZero:
-        return 0.0
-    nn = rg.Vector3d(n)
-    nn.Unitize()
-    z = rg.Vector3d(0, 0, 1)
-    return 1.0 - max(0.0, min(1.0, abs(rg.Vector3d.Multiply(nn, z))))
-
-
+# ---------------------------------------------------------------------------
+# STRUCTURAL TOPOLOGY HELPERS
+# ---------------------------------------------------------------------------
 def infer_grid_dims(n, aspect_uv):
     n = as_int(n, 0, min_value=0)
     if n < 4:
@@ -131,46 +138,11 @@ def infer_grid_dims(n, aspect_uv):
     return best
 
 
-def select_seed_points(surface, pts3, target_count, slope_bias, slope_power, seed_val):
-    if not pts3:
-        return [], (0, 0)
-    n = len(pts3)
-    target = as_int(target_count, n, min_value=1)
-    b = clamp01(as_float(slope_bias, 0.0))
-    pwr = as_float(slope_power, 2.0, min_value=0.1)
-    if b <= 1e-12 and target == n:
-        return list(pts3), (n, n)
-
-    candidates, weights = [], []
-    for p3 in pts3:
-        ok, u, v = surface.ClosestPoint(p3)
-        if not ok:
-            continue
-        slope_mag = slope_magnitude_from_normal(surface.NormalAt(u, v))
-        candidates.append(p3)
-        weights.append(max(1e-12, (1.0 - b) + (b * (slope_mag ** pwr))))
-
-    m = len(candidates)
-    if m == 0:
-        return [], (0, 0)
-
-    w = np.array(weights, dtype=float)
-    s = float(np.sum(w))
-    w[:] = (1.0 / float(m)) if s <= 1e-12 else (w / s)
-    rng = np.random.RandomState(int(seed_val) if seed_val is not None else 0)
-    replace = bool(target > m)
-    try:
-        idx = rng.choice(m, size=target, replace=replace, p=w)
-    except:
-        idx = rng.choice(m, size=target, replace=replace)
-    return [candidates[int(i)] for i in idx], (m, target)
-
-
 def assign_structural_links(agents, surface):
     for a in agents:
         a.struct_neighbors, a.struct_rest_lengths = [], []
-    if (not agents) or (not bool(AGENT_DEFAULTS.get("struct_enable", True))):
-        return {"enabled": False, "reason": "disabled_or_empty", "u_count": 0, "v_count": 0, "links": 0}
+    if not agents:
+        return {"enabled": False, "reason": "empty", "u_count": 0, "v_count": 0, "links": 0}
 
     n = len(agents)
     u_count = v_count = None
@@ -223,13 +195,42 @@ class Agent:
         self.position = rg.Point3d(surface.PointAt(self.uv.X, self.uv.Y))
         self.velocity = rg.Vector3d(0, 0, 0)
         self.struct_neighbors, self.struct_rest_lengths = [], []
-        for k, v in AGENT_DEFAULTS.items():
-            setattr(self, k, v)
-        self.freedom = clamp01(float(self.freedom))
+
+        # Runtime-controlled from agent_simulator (sliders).
+        self.base_speed = max(1e-6, float(max_speed))
+        self.sep_gain = 0.0
+        self.coh_gain = 0.0
+        self.base_spacing = 1.0
+        self.freedom = 0.0
+        self.curv_gain = 0.0
+        self.slope_gain = 0.0
+        self.struct_spring_gain = 0.0
+        self.struct_min_dist_gain = 0.0
+
+        # Fixed internals (kept in builder).
+        self.coh_radius_mult = 2.0
+        self.momentum = 0.6
+        self.curv_speed_k = 1.2
+        self.slope_speed_k = 0.9
+        self.slope_spacing_k = 0.8
+        self.curv_follow_k = 1.5
+        self.eps_frac = 0.01
+        self.group_slope_gain = 0.55
+        self.slope_peer_gain = 0.45
+        self.slope_diff_min = 0.04
+        self.curv_use_max = True
+        self.curv_scale = 0.08
+        self.curv_damp = 0.60
+        self.slope_damp = 0.25
+        self.hardcore_ratio = 0.35
+        self.hardcore_boost = 2.0
+        self.sep_vec_cap = 3.0
+        self.struct_enable = True
+        self.struct_min_dist_ratio = 0.70
+
         self.momentum = clamp01(float(self.momentum))
         self.curv_damp = clamp01(float(self.curv_damp))
         self.slope_damp = clamp01(float(self.slope_damp))
-        self.base_speed = max(1e-6, float(max_speed))
         self._refresh_freedom_gains()
         self.curv_dir = None
         self.curv_mag = 0.0
@@ -244,13 +245,24 @@ class Agent:
     def apply_runtime_params(self, params):
         if not isinstance(params, dict) or not params:
             return
-        self.base_speed = as_float(params.get("max_speed", self.base_speed), self.base_speed, min_value=1e-6)
-        self.sep_gain = as_float(params.get("sep_gain", self.sep_gain), self.sep_gain, min_value=0.0)
-        self.coh_gain = as_float(params.get("coh_gain", self.coh_gain), self.coh_gain, min_value=0.0)
-        self.base_spacing = as_float(params.get("base_spacing", self.base_spacing), self.base_spacing, min_value=1e-6)
-        self.freedom = clamp01(as_float(params.get("freedom", self.freedom), self.freedom))
-        self.struct_spring_gain = as_float(params.get("struct_spring_gain", self.struct_spring_gain), self.struct_spring_gain, min_value=0.0)
-        self.struct_min_dist_gain = as_float(params.get("struct_min_dist_gain", self.struct_min_dist_gain), self.struct_min_dist_gain, min_value=0.0)
+        if "max_speed" in params:
+            self.base_speed = as_float(params["max_speed"], self.base_speed, min_value=1e-6)
+        if "sep_gain" in params:
+            self.sep_gain = as_float(params["sep_gain"], self.sep_gain, min_value=0.0)
+        if "coh_gain" in params:
+            self.coh_gain = as_float(params["coh_gain"], self.coh_gain, min_value=0.0)
+        if "base_spacing" in params:
+            self.base_spacing = as_float(params["base_spacing"], self.base_spacing, min_value=1e-6)
+        if "freedom" in params:
+            self.freedom = clamp01(as_float(params["freedom"], self.freedom))
+        if "curv_gain" in params:
+            self.curv_gain = as_float(params["curv_gain"], self.curv_gain, min_value=0.0)
+        if "slope_gain" in params:
+            self.slope_gain = as_float(params["slope_gain"], self.slope_gain, min_value=0.0)
+        if "struct_spring_gain" in params:
+            self.struct_spring_gain = as_float(params["struct_spring_gain"], self.struct_spring_gain, min_value=0.0)
+        if "struct_min_dist_gain" in params:
+            self.struct_min_dist_gain = as_float(params["struct_min_dist_gain"], self.struct_min_dist_gain, min_value=0.0)
         self._refresh_freedom_gains()
 
     def sense(self, _agents):
@@ -474,26 +486,18 @@ class Agent:
         self.move()
 
 
-def build_agents_from_seed(surface, seed_points, max_speed, seed_val=None):
+# ---------------------------------------------------------------------------
+# AGENT BUILD
+# ---------------------------------------------------------------------------
+def build_agents_from_seed(surface, seed_points, max_speed):
     pts_raw = iter_any(seed_points)
     pts3 = [p for p in [to_point3d(pt) for pt in pts_raw] if p is not None]
 
-    if (not pts3) and (surface is not None):
-        div_u, div_v = as_int(FALLBACK_DIV_U, 8, 1), as_int(FALLBACK_DIV_V, 8, 1)
-        du, dv = surface.Domain(0), surface.Domain(1)
-        for i in range(div_u + 1):
-            u = du.T0 + (float(i) / float(div_u)) * (du.T1 - du.T0)
-            for j in range(div_v + 1):
-                v = dv.T0 + (float(j) / float(div_v)) * (dv.T1 - dv.T0)
-                pts3.append(surface.PointAt(u, v))
-
-    init_count = len(pts3) if SEED_CFG["init_agent_count"] is None else as_int(SEED_CFG["init_agent_count"], len(pts3), 1)
-    seed_slope_bias = clamp01(float(SEED_CFG["slope_bias"]))
-    seed_slope_power = max(0.1, float(SEED_CFG["slope_power"]))
-    pts3_selected, sel_dbg = select_seed_points(surface, pts3, init_count, seed_slope_bias, seed_slope_power, seed_val)
+    if not pts3:
+        return [], "ERROR: seed_points is empty or invalid (no builder fallback)", []
 
     agents, uv_keys, pos_keys = [], [], []
-    for p3 in pts3_selected:
+    for p3 in pts3:
         ok, u, v = surface.ClosestPoint(p3)
         if not ok:
             continue
@@ -504,19 +508,21 @@ def build_agents_from_seed(surface, seed_points, max_speed, seed_val=None):
 
     struct_info = assign_structural_links(agents, surface)
     dbg = (
-        "seed_raw:{0} seed_coerced:{1} seed_selected:{2} agents:{3} unique_uv:{4} unique_pos:{5} unique_seed:{6} "
-        "slope_bias:{7:.3f} slope_power:{8:.3f} struct:{9} dims:{10}x{11} links:{12}"
+        "seed_raw:{0} seed_valid:{1} agents:{2} unique_uv:{3} unique_pos:{4} unique_seed:{5} "
+        "struct:{6} dims:{7}x{8} links:{9}"
     ).format(
-        len(pts_raw), len(pts3), sel_dbg[1], len(agents), len(set(uv_keys)), len(set(pos_keys)),
-        len(set([(round(p.X, 6), round(p.Y, 6), round(p.Z, 6)) for p in pts3_selected])),
-        seed_slope_bias, seed_slope_power,
+        len(pts_raw), len(pts3), len(agents), len(set(uv_keys)), len(set(pos_keys)),
+        len(set([(round(p.X, 6), round(p.Y, 6), round(p.Z, 6)) for p in pts3])),
         "on" if bool(struct_info.get("enabled", False)) else "off:" + str(struct_info.get("reason", "na")),
         int(struct_info.get("u_count", 0)), int(struct_info.get("v_count", 0)), int(struct_info.get("links", 0)),
     )
-    return agents, dbg, pts3_selected
+    return agents, dbg, pts3
 
 
 class MyComponent(Grasshopper.Kernel.GH_ScriptInstance):
+    # -----------------------------------------------------------------------
+    # GH SCRIPT ENTRY
+    # -----------------------------------------------------------------------
     def RunScript(self, reset, base_surface, seed, max_speed, seed_points: list[object]):
         seed_everything(seed)
         srf = coerce_surface_face(base_surface)
@@ -524,7 +530,7 @@ class MyComponent(Grasshopper.Kernel.GH_ScriptInstance):
             if srf is None:
                 self.agents, self.dbg, self.seed_preview = [], "ERROR: base_surface is None or could not be coerced", []
             else:
-                self.agents, self.dbg, self.seed_preview = build_agents_from_seed(srf, seed_points, max_speed, seed)
+                self.agents, self.dbg, self.seed_preview = build_agents_from_seed(srf, seed_points, max_speed)
             self._inited = True
 
         agents = getattr(self, "agents", [])
