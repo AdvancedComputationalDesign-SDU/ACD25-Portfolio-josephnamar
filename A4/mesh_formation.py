@@ -1,4 +1,3 @@
-import scriptcontext as sc
 import Rhino.Geometry as rg
 import rhinoscriptsyntax as rs
 
@@ -10,13 +9,9 @@ import rhinoscriptsyntax as rs
 # - base_surface : Surface/BrepFace/Brep (if Brep, first face is used)
 # - points       : moving points (typically simulator P output)
 #
-# Optional inputs:
-# - grid_u         : int. Optional explicit number of points in U direction.
-# - grid_v         : int. Optional explicit number of points in V direction.
-#
 # Outputs:
-# - out_mesh  : quad mesh (disconnected quads for per-panel shape stability)
-# - out_edges : panel boundary lines
+# - out_mesh  : dynamic triangle mesh (UV Delaunay rebuilt each solve)
+# - out_edges : mesh boundary lines
 # - dbg       : debug string
 # ---------------------------------------------------------------------------
 
@@ -339,108 +334,43 @@ else:
             if du == 0.0 or dv == 0.0:
                 dbg = "ERROR: surface domain is degenerate"
             else:
-                aspect = abs(du / dv) if abs(dv) > 1e-12 else 1.0
+                # Option 1: dynamic topology. Rebuild Delaunay connectivity every solve.
+                uv_norm = []
+                for (u, v) in uv_pts:
+                    un = clamp01((u - float(dom_u.T0)) / du)
+                    vn = clamp01((v - float(dom_v.T0)) / dv)
+                    uv_norm.append((un, vn))
 
-                # Optional explicit grid dimensions (points in U and V).
-                gu_in = globals().get("grid_u", None)
-                gv_in = globals().get("grid_v", None)
-                if (gu_in is not None) and (gv_in is not None):
-                    u_count = as_int(gu_in, 0, min_value=2)
-                    v_count = as_int(gv_in, 0, min_value=2)
-                    dims = (u_count, v_count)
+                tris = delaunay_triangulate_2d(uv_norm)
+                if len(tris) == 0:
+                    dbg = "ERROR: dynamic triangulation returned 0 triangles"
                 else:
-                    dims = infer_grid_dims(n, aspect)
-
-                use_quads = False
-                if dims is not None:
-                    u_count, v_count = dims
-                    if (u_count * v_count) == n and u_count >= 2 and v_count >= 2:
-                        use_quads = True
-
-                if use_quads:
-                    guid = str(ghenv.Component.InstanceGuid)
-                    k_dims = "A4_quad_dims_" + guid
-                    k_faces = "A4_quad_faces_" + guid
-
-                    quads = build_quad_faces(u_count, v_count)
-
-                    if (sc.sticky.get(k_dims, None) != (u_count, v_count)) or (k_faces not in sc.sticky):
-                        sc.sticky[k_dims] = (u_count, v_count)
-                        sc.sticky[k_faces] = quads
-
-                    quads = sc.sticky.get(k_faces, quads)
-
                     mesh = rg.Mesh()
-
-                    # Build disconnected quads directly from current moving points.
-                    for (a, b, c, d) in quads:
-                        ua, va = uv_pts[a]
-                        ub, vb = uv_pts[b]
-                        uc, vc = uv_pts[c]
-                        ud, vd = uv_pts[d]
-
-                        quad_pts = [
-                            srf.PointAt(clamp(ua, float(dom_u.T0), float(dom_u.T1)), clamp(va, float(dom_v.T0), float(dom_v.T1))),
-                            srf.PointAt(clamp(ub, float(dom_u.T0), float(dom_u.T1)), clamp(vb, float(dom_v.T0), float(dom_v.T1))),
-                            srf.PointAt(clamp(uc, float(dom_u.T0), float(dom_u.T1)), clamp(vc, float(dom_v.T0), float(dom_v.T1))),
-                            srf.PointAt(clamp(ud, float(dom_u.T0), float(dom_u.T1)), clamp(vd, float(dom_v.T0), float(dom_v.T1))),
-                        ]
-
-                        base = mesh.Vertices.Count
-                        for p in quad_pts:
-                            mesh.Vertices.Add(p)
-                        mesh.Faces.AddFace(base + 0, base + 1, base + 2, base + 3)
-
-                        out_edges.append(rg.Line(quad_pts[0], quad_pts[1]))
-                        out_edges.append(rg.Line(quad_pts[1], quad_pts[2]))
-                        out_edges.append(rg.Line(quad_pts[2], quad_pts[3]))
-                        out_edges.append(rg.Line(quad_pts[3], quad_pts[0]))
-
-                    if mesh.Faces.Count == 0:
-                        dbg = "ERROR: no quad faces created"
-                    else:
-                        mesh.Normals.ComputeNormals()
-                        mesh.Compact()
-                        out_mesh = mesh
-                        dbg = "OK(quads): input:{} valid:{} bad:{} grid:{}x{} quads:{}".format(
-                            len(pts), n, bad, u_count, v_count, mesh.Faces.Count
-                        )
-                else:
-                    # Fallback if grid cannot be inferred: triangulate current points.
-                    uv_norm = []
                     for (u, v) in uv_pts:
-                        un = clamp01((u - float(dom_u.T0)) / du)
-                        vn = clamp01((v - float(dom_v.T0)) / dv)
-                        uv_norm.append((un, vn))
+                        u_clamp = clamp(u, float(dom_u.T0), float(dom_u.T1))
+                        v_clamp = clamp(v, float(dom_v.T0), float(dom_v.T1))
+                        mesh.Vertices.Add(srf.PointAt(u_clamp, v_clamp))
 
-                    tris = delaunay_triangulate_2d(uv_norm)
-                    if len(tris) == 0:
-                        dbg = "ERROR: triangulation returned 0 triangles"
-                    else:
-                        mesh = rg.Mesh()
-                        for p in valid_pts:
-                            mesh.Vertices.Add(p)
+                    for (a, b, c) in tris:
+                        mesh.Faces.AddFace(int(a), int(b), int(c))
 
-                        for (a, b, c) in tris:
-                            mesh.Faces.AddFace(int(a), int(b), int(c))
+                    mesh.Normals.ComputeNormals()
+                    mesh.Compact()
+                    out_mesh = mesh
 
-                        mesh.Normals.ComputeNormals()
-                        mesh.Compact()
-                        out_mesh = mesh
+                    edge_set = set()
+                    for f in mesh.Faces:
+                        if not f.IsTriangle:
+                            continue
+                        A, B, C = f.A, f.B, f.C
+                        for i, j in ((A, B), (B, C), (C, A)):
+                            if i > j:
+                                i, j = j, i
+                            edge_set.add((i, j))
 
-                        edge_set = set()
-                        for f in mesh.Faces:
-                            if not f.IsTriangle:
-                                continue
-                            A, B, C = f.A, f.B, f.C
-                            for i, j in ((A, B), (B, C), (C, A)):
-                                if i > j:
-                                    i, j = j, i
-                                edge_set.add((i, j))
+                    for i, j in edge_set:
+                        out_edges.append(rg.Line(mesh.Vertices[i], mesh.Vertices[j]))
 
-                        for i, j in edge_set:
-                            out_edges.append(rg.Line(mesh.Vertices[i], mesh.Vertices[j]))
-
-                        dbg = "OK(tris): input:{} valid:{} bad:{} tris:{}".format(
-                            len(pts), n, bad, mesh.Faces.Count
-                        )
+                    dbg = "OK(dynamic_tris): input:{} valid:{} bad:{} tris:{} edges:{} topology:rebuilt".format(
+                        len(pts), n, bad, mesh.Faces.Count, len(edge_set)
+                    )
