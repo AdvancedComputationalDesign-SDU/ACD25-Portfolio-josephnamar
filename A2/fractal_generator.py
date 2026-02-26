@@ -1,87 +1,245 @@
-"""
-Assignment 2: Fractal Generator
-
-Author: Your Name
-
-Description:
-This script generates fractal patterns using recursive functions and geometric transformations.
-"""
-
-# Import necessary libraries
-import math
+import os
+import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from shapely.geometry import LineString
-from shapely.affinity import rotate, translate
-import random
 
-# Global list to store all line segments
-line_list = []
+"""
+Assignment A2 – Fractal Generator
 
-def generate_fractal(start_point, angle, length, depth, max_depth, angle_change, length_scaling_factor):
+This script generates 2D dragon-curve based fractal patterns using a recursive
+turn sequence and a turtle-style path construction. Several controlled
+variations are produced to explore constraints (self-avoidance) and steering
+effects (attractor bias).
+
+Output is visualized or saved depending on MODE.
+"""
+
+# =========================
+# GLOBAL CONFIGURATION
+# =========================
+# Execution mode: visualize ("vis") or save images ("save")
+MODE = "save"   # "vis" or "save"
+# Random seed for reproducible stochastic behavior
+SEED = 42
+# Iteration counts to generate (higher = more segments)
+ITERATION_LIST = [3, 7, 10, 15]
+# Step length per move
+STEP = 1.0
+
+# Self-intersection control
+AVOID_SELF = True          # True: avoid self-intersection, False: allow self-intersection
+STOP_ON_COLLISION = False  
+
+# Attractor bias parameters
+USE_ATTRACTOR = True
+ATTRACTOR = (20.0, 20.0)   # move this to shape composition
+# Strength of attractor influence (0 = none, 1 = strong)
+BIAS_STRENGTH = 0.35       # 0.2 subtle, 0.35 good, 0.6 strong
+
+
+
+OUT_DIR = os.path.join(os.path.dirname(__file__), "images")
+BASE_TITLE = "Dragon curve"
+
+os.makedirs(OUT_DIR, exist_ok=True)
+np.random.seed(SEED)
+
+
+# =========================
+# OUTPUT TITLE
+# =========================
+def make_title(base):
+    return f"{base} | iterations={ITERATIONS} | seed={SEED}"
+
+
+# =========================
+# FRACTAL RULE GENERATION
+# =========================
+def dragon_turns(n):
+    if n <= 0:
+        return []
+    prev = dragon_turns(n - 1)
+    inv_rev = [-t for t in reversed(prev)]
+    # 0:E, 1:N, 2:W, 3:S
+    return prev + [1] + inv_rev 
+
+
+# =========================
+# PATH CONSTRUCTION
+# =========================
+def build_points(turns, step=1.0, avoid_self=False, stop_on_collision=True,
+                 use_attractor=False, attractor=(0.0, 0.0), bias_strength=0.0):
     """
-    Recursive function to generate fractal patterns.
-
-    Parameters:
-    - start_point: Tuple (x, y), starting coordinate.
-    - angle: Float, current angle in degrees.
-    - length: Float, length of the current line segment.
-    - depth: Int, current recursion depth.
-    - max_depth: Int, maximum recursion depth.
-    - angle_change: Float, angle change at each recursion.
-    - length_scaling_factor: Float, scaling factor for the length.
+    Build a polyline from a dragon-curve turn sequence.
     """
-    if depth > max_depth:
-        return
 
-    # Calculate the end point of the line segment
-    end_x = start_point[0] + length * math.cos(math.radians(angle))
-    end_y = start_point[1] + length * math.sin(math.radians(angle))
-    end_point = (end_x, end_y)
+    # Current heading (0=E, 1=N, 2=W, 3=S)
+    heading = 0  
+    x, y = 0.0, 0.0
+    pts = [(x, y)]
 
-    # Create a line segment using Shapely
-    line = LineString([start_point, end_point])
-    line_list.append(line)
+    def step_vec(h):
+        if h == 0:
+            return (step, 0.0)
+        if h == 1:
+            return (0.0, step)
+        if h == 2:
+            return (-step, 0.0)
+        return (0.0, -step)
 
-    # Update the length for the next recursion
-    new_length = length * length_scaling_factor
+    # Store previous segments for collision checks
+    segments = []
 
-    # Increment depth
-    next_depth = depth + 1
+    dx, dy = step_vec(heading)
+    x2, y2 = x + dx, y + dy
 
-    # Recursive calls for branches
-    generate_fractal(end_point, angle + angle_change, new_length, next_depth, max_depth, angle_change, length_scaling_factor)
-    generate_fractal(end_point, angle - angle_change, new_length, next_depth, max_depth, angle_change, length_scaling_factor)
+    x, y = x2, y2
+    pts.append((x, y))
+    segments.append(((0.0, 0.0), (x2, y2)))
 
-# Main execution
-if __name__ == "__main__":
-    # Parameters
-    start_point = (0, 0)
-    initial_angle = 90
-    initial_length = 100
-    recursion_depth = 0
-    max_recursion_depth = 5
-    angle_change = 30
-    length_scaling_factor = 0.7
+    for t in turns:
 
-    # Clear the line list
-    line_list.clear()
+        t_use = t
 
-    # Generate the fractal
-    generate_fractal(start_point, initial_angle, initial_length, recursion_depth, max_recursion_depth, angle_change, length_scaling_factor)
+        if use_attractor and bias_strength > 0.0:
+            # Optional steering toward attractor
+            ax, ay = attractor
 
-    # Visualization
+            h_planned = (heading + t) % 4
+            h_flipped = (heading - t) % 4
+
+            dx_p, dy_p = step_vec(h_planned)
+            dx_f, dy_f = step_vec(h_flipped)
+
+            vx, vy = ax - x, ay - y
+            n = (vx * vx + vy * vy) ** 0.5
+            if n > 1e-9:
+                vx, vy = vx / n, vy / n
+            else:
+                vx, vy = 0.0, 0.0
+
+            score_p = dx_p * vx + dy_p * vy
+            score_f = dx_f * vx + dy_f * vy
+
+            improvement = max(0.0, score_f - score_p)
+            p_flip = min(1.0, bias_strength * (improvement / 2.0))
+
+            if np.random.rand() < p_flip:
+                t_use = -t
+
+
+        heading = (heading + t_use) % 4
+        dx, dy = step_vec(heading)
+        nx, ny = x + dx, y + dy
+
+
+        if avoid_self:
+            # Collision check against previous segments
+            cand = LineString([(x, y), (nx, ny)])
+
+            collision = False
+            for (p0, p1) in segments[:-1]:
+                old = LineString([p0, p1])
+                if cand.intersects(old):
+                    collision = True
+                    break
+
+            if collision:
+                if stop_on_collision:
+                    break
+                else:
+                    continue
+
+        segments.append(((x, y), (nx, ny)))
+        x, y = nx, ny
+        pts.append((x, y))
+
+    return pts
+
+
+
+# =========================
+# OUTPUT (VISUALIZE OR SAVE)
+# =========================
+def output(points, out_path=None, title=None):
+    """
+    Render the polyline and visualize or save the result.
+    """
+    # Build line segments
+    segments = [[points[i], points[i + 1]] for i in range(len(points) - 1)]
+    values = np.arange(len(segments))
+
+    lc = LineCollection(segments, cmap="viridis", linewidth=1.0)
+    lc.set_array(values)
+
+    # Set up figure and axes
     fig, ax = plt.subplots()
-    for line in line_list:
-        x, y = line.xy
-        ax.plot(x, y, color='green', linewidth=1)
+    ax.add_collection(lc)
+    ax.set_aspect("equal", adjustable="box")
+    ax.autoscale()
+    ax.axis("off")
 
-    # Optional: Customize the plot
-    ax.set_aspect('equal')
-    plt.axis('off')
-    plt.show()
+    full_title = make_title(BASE_TITLE)
 
-    # Save the figure
-    fig.savefig('images/fractal_tree.png', dpi=300, bbox_inches='tight')
+    fig.text(
+        0.5,
+        0.02,
+        full_title,
+        ha="center",
+        va="center",
+        fontsize=9
+    )
+    # Show or save depending on MODE
+    if MODE == "vis":
+        plt.show()
+        plt.close(fig)
+    elif MODE == "save":
+        filename = full_title.replace(" ", "").replace("|", "_").replace("=", "")
+        out_path = os.path.join(OUT_DIR, f"{filename}.png")
+        fig.savefig(out_path, dpi=300, bbox_inches="tight", pad_inches=0.1)
+        plt.close(fig)
+        print(f"Saved: {out_path}")
+    else:
+        plt.close(fig)
+        raise ValueError("MODE must be 'vis' or 'save'")
 
-    # Repeat the process with different parameters for additional fractals
-    # ...
+
+# =========================
+# MAIN EXECUTION
+# =========================
+if __name__ == "__main__":
+
+    for i in ITERATION_LIST:
+        ITERATIONS = i
+        turns = dragon_turns(ITERATIONS)
+
+        # Baseline
+        BASE_TITLE = "baseline"
+        points = build_points(turns, step=STEP, avoid_self=False)
+        output(points)
+
+        # Self-avoid
+        BASE_TITLE = "self_avoid"
+        points = build_points(turns, step=STEP, avoid_self=True, stop_on_collision=STOP_ON_COLLISION)
+        output(points)
+
+        # Attractor
+        BASE_TITLE = "attractor"
+        np.random.seed(SEED)
+        points = build_points(
+            turns, step=STEP,
+            avoid_self=False,
+            use_attractor=True, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
+        )
+        output(points)
+
+        # Attractor + self-avoid
+        BASE_TITLE = "attractor_self_avoid"
+        np.random.seed(SEED)
+        points = build_points(
+            turns, step=STEP,
+            avoid_self=True, stop_on_collision=STOP_ON_COLLISION,
+            use_attractor=True, attractor=ATTRACTOR, bias_strength=BIAS_STRENGTH
+        )
+        output(points)
